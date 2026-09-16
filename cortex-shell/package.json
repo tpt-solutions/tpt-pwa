@@ -1,0 +1,16 @@
+{
+  "name": "cortex-shell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "prepare": "node scripts/prepare-sidecar.mjs",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

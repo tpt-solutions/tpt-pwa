@@ -1,0 +1,356 @@
+// Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
+
+//! The stack VM. Totality contract: `run` either finishes or returns an
+//! error -- never panics, never blocks, never touches the outside world
+//! except through [`NativeEnv`]. An instruction budget bounds runaway loops
+//! (the DSL has no `while`, but a hostile script could still jump forever).
+
+use std::fmt;
+
+use crate::bytecode::{Instr, NativeId, Program};
+use crate::natives::NativeEnv;
+use crate::natives::NativeRegistry;
+use crate::value::Value;
+
+/// Default budget: generous for sync-shaped tasks, finite by construction.
+pub const DEFAULT_INSTRUCTION_BUDGET: u64 = 1_000_000;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VmError {
+    StackUnderflow,
+    TypeMismatch {
+        expected: &'static str,
+        found: &'static str,
+    },
+    UndefinedMember {
+        field: String,
+    },
+    Native(String),
+    BudgetExhausted,
+    BadProgram(&'static str),
+}
+
+impl fmt::Display for VmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VmError::StackUnderflow => write!(f, "stack underflow (malformed program)"),
+            VmError::TypeMismatch { expected, found } => {
+                write!(f, "type mismatch: expected {expected}, found {found}")
+            }
+            VmError::UndefinedMember { field } => write!(f, "undefined member `{field}`"),
+            VmError::Native(message) => write!(f, "native call failed: {message}"),
+            VmError::BudgetExhausted => write!(f, "instruction budget exhausted"),
+            VmError::BadProgram(reason) => write!(f, "malformed program: {reason}"),
+        }
+    }
+}
+
+pub struct Vm<'env> {
+    program: Program,
+    env: &'env mut dyn NativeEnv,
+    registry: NativeRegistry,
+    stack: Vec<Value>,
+    locals: Vec<Value>,
+    budget: u64,
+}
+
+impl<'env> Vm<'env> {
+    pub fn new(program: Program, env: &'env mut dyn NativeEnv, registry: &NativeRegistry) -> Self {
+        let locals = program.locals as usize;
+        Vm {
+            program,
+            env,
+            registry: registry.clone(),
+            stack: Vec::new(),
+            locals: vec![Value::Null; locals],
+            budget: DEFAULT_INSTRUCTION_BUDGET,
+        }
+    }
+
+    pub fn with_budget(mut self, budget: u64) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Execute to completion. Errors are values; panics are not possible
+    /// (no indexing without bounds checks, no unsafe, no recursion).
+    pub fn run(&mut self) -> Result<Value, VmError> {
+        let mut pc: usize = 0;
+        while pc < self.program.code.len() {
+            if self.budget == 0 {
+                return Err(VmError::BudgetExhausted);
+            }
+            self.budget -= 1;
+            let instr = self.program.code[pc].clone();
+            pc += 1;
+            match instr {
+                Instr::Const(index) => {
+                    let value = self
+                        .program
+                        .constants
+                        .get(index as usize)
+                        .ok_or(VmError::BadProgram("constant out of range"))?;
+                    self.stack.push(value.clone());
+                }
+                Instr::LoadLocal(slot) => {
+                    let value = self
+                        .locals
+                        .get(slot as usize)
+                        .ok_or(VmError::BadProgram("local out of range"))?;
+                    self.stack.push(value.clone());
+                }
+                Instr::StoreLocal(slot) => {
+                    let value = self.pop()?;
+                    let slot_ref = self
+                        .locals
+                        .get_mut(slot as usize)
+                        .ok_or(VmError::BadProgram("local out of range"))?;
+                    *slot_ref = value;
+                }
+                Instr::Pop => {
+                    self.pop()?;
+                }
+                Instr::Add => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let sum = match (lhs, rhs) {
+                        (Value::Int(a), Value::Int(b)) => a
+                            .checked_add(b)
+                            .map(Value::Int)
+                            .ok_or(VmError::BadProgram("integer overflow"))?,
+                        (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+                        (Value::Str(a), Value::Str(b)) => Value::Str(a + &b),
+                        (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 + b),
+                        (Value::Float(a), Value::Int(b)) => Value::Float(a + b as f64),
+                        (lhs, rhs) => {
+                            return Err(type_mismatch("numbers or strings", &lhs, &rhs));
+                        }
+                    };
+                    self.stack.push(sum);
+                }
+                Instr::Sub => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let diff = match (lhs, rhs) {
+                        (Value::Int(a), Value::Int(b)) => a
+                            .checked_sub(b)
+                            .map(Value::Int)
+                            .ok_or(VmError::BadProgram("integer overflow"))?,
+                        (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+                        (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 - b),
+                        (Value::Float(a), Value::Int(b)) => Value::Float(a - b as f64),
+                        (lhs, rhs) => return Err(type_mismatch("numbers", &lhs, &rhs)),
+                    };
+                    self.stack.push(diff);
+                }
+                Instr::Not => {
+                    let value = self.pop()?;
+                    self.stack.push(Value::Bool(!value.truthy()));
+                }
+                Instr::And => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    self.stack.push(Value::Bool(lhs.truthy() && rhs.truthy()));
+                }
+                Instr::Or => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    self.stack.push(Value::Bool(lhs.truthy() || rhs.truthy()));
+                }
+                Instr::Eq => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    self.stack.push(Value::Bool(lhs == rhs));
+                }
+                Instr::NotEq => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    self.stack.push(Value::Bool(lhs != rhs));
+                }
+                Instr::Less | Instr::LessEq | Instr::Greater | Instr::GreaterEq => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let ordering = compare(&lhs, &rhs)?;
+                    let result = match instr {
+                        Instr::Less => ordering == std::cmp::Ordering::Less,
+                        Instr::LessEq => ordering != std::cmp::Ordering::Greater,
+                        Instr::Greater => ordering == std::cmp::Ordering::Greater,
+                        _ => ordering != std::cmp::Ordering::Less,
+                    };
+                    self.stack.push(Value::Bool(result));
+                }
+                Instr::MemberGet => {
+                    let key = self.pop()?;
+                    let object = self.pop()?;
+                    let field = match key {
+                        Value::Str(field) => field,
+                        other => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "string key",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    match object {
+                        Value::Map(map) => match map.get(&field) {
+                            Some(value) => self.stack.push(value.clone()),
+                            None => return Err(VmError::UndefinedMember { field }),
+                        },
+                        other => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "map",
+                                found: other.type_name(),
+                            })
+                        }
+                    }
+                }
+                Instr::ListLen => {
+                    let list = self.pop()?;
+                    match list {
+                        Value::List(items) => self.stack.push(Value::Int(items.len() as i64)),
+                        other => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "list",
+                                found: other.type_name(),
+                            })
+                        }
+                    }
+                }
+                Instr::ListGet => {
+                    let index = self.pop()?;
+                    let list = self.pop()?;
+                    match (list, index) {
+                        (Value::List(items), Value::Int(index)) => {
+                            let item = items
+                                .get(index as usize)
+                                .ok_or(VmError::BadProgram("list index out of range"))?;
+                            self.stack.push(item.clone());
+                        }
+                        (Value::List(_), other) => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "int index",
+                                found: other.type_name(),
+                            })
+                        }
+                        (other, _) => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "list",
+                                found: other.type_name(),
+                            })
+                        }
+                    }
+                }
+                Instr::CallNative { native, argc } => self.call_native(native, argc)?,
+                Instr::Jump(target) => {
+                    pc = self.target(target)?;
+                }
+                Instr::JumpIfFalse(target) => {
+                    let cond = self.pop()?;
+                    if !cond.truthy() {
+                        pc = self.target(target)?;
+                    }
+                }
+                Instr::Return => {
+                    return Ok(self.pop().unwrap_or(Value::Null));
+                }
+            }
+        }
+        Err(VmError::BadProgram("fell off the end without Return"))
+    }
+
+    fn target(&self, target: u16) -> Result<usize, VmError> {
+        let index = target as usize;
+        if index <= self.program.code.len() {
+            Ok(index)
+        } else {
+            Err(VmError::BadProgram("jump target out of range"))
+        }
+    }
+
+    fn pop(&mut self) -> Result<Value, VmError> {
+        self.stack.pop().ok_or(VmError::StackUnderflow)
+    }
+
+    fn call_native(&mut self, native: NativeId, argc: u8) -> Result<(), VmError> {
+        if (argc as usize) > self.stack.len() {
+            return Err(VmError::StackUnderflow);
+        }
+        if !self.registry.accepts(native, argc) {
+            return Err(VmError::BadProgram("native arity mismatch"));
+        }
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let result = match native {
+            NativeId::DbQuery => {
+                let (sql, params) = sql_args(args)?;
+                let rows = self.env.db_query(&sql, &params).map_err(VmError::Native)?;
+                Value::List(rows)
+            }
+            NativeId::DbExec => {
+                let (sql, params) = sql_args(args)?;
+                self.env.db_exec(&sql, &params).map_err(VmError::Native)?
+            }
+            NativeId::NetIsConnected => {
+                Value::Bool(self.env.net_is_connected().map_err(VmError::Native)?)
+            }
+            NativeId::HttpPost => {
+                let mut iter = args.into_iter();
+                let url = match iter.next() {
+                    Some(Value::Str(url)) => url,
+                    Some(other) => {
+                        return Err(VmError::TypeMismatch {
+                            expected: "string url",
+                            found: other.type_name(),
+                        })
+                    }
+                    None => return Err(VmError::StackUnderflow),
+                };
+                let body = iter.next().unwrap_or(Value::Null);
+                self.env.http_post(&url, &body).map_err(VmError::Native)?
+            }
+        };
+        self.stack.push(result);
+        Ok(())
+    }
+}
+
+fn sql_args(args: Vec<Value>) -> Result<(String, Vec<Value>), VmError> {
+    let mut iter = args.into_iter();
+    let sql = match iter.next() {
+        Some(Value::Str(s)) => s,
+        Some(other) => {
+            return Err(VmError::TypeMismatch {
+                expected: "string sql",
+                found: other.type_name(),
+            })
+        }
+        None => return Err(VmError::StackUnderflow),
+    };
+    Ok((sql, iter.collect()))
+}
+
+fn compare(lhs: &Value, rhs: &Value) -> Result<std::cmp::Ordering, VmError> {
+    match (lhs, rhs) {
+        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
+        (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
+        (Value::Int(a), Value::Float(b)) => Ok((*a as f64)
+            .partial_cmp(b)
+            .unwrap_or(std::cmp::Ordering::Less)),
+        (Value::Float(a), Value::Int(b)) => Ok(a
+            .partial_cmp(&(*b as f64))
+            .unwrap_or(std::cmp::Ordering::Less)),
+        (Value::Float(a), Value::Float(b)) => {
+            Ok(a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
+        }
+        (lhs, rhs) => Err(type_mismatch("comparable values", lhs, rhs)),
+    }
+}
+
+fn type_mismatch(expected: &'static str, lhs: &Value, rhs: &Value) -> VmError {
+    let found: &'static str = match (lhs, rhs) {
+        (Value::Str(_), _) | (_, Value::Str(_)) => "string",
+        (Value::Float(_), _) | (_, Value::Float(_)) => "float",
+        (Value::Int(_), _) | (_, Value::Int(_)) => "int",
+        (Value::Bool(_), _) | (_, Value::Bool(_)) => "bool",
+        (Value::List(_), _) | (_, Value::List(_)) => "list",
+        (Value::Map(_), _) | (_, Value::Map(_)) => "map",
+        _ => "null",
+    };
+    VmError::TypeMismatch { expected, found }
+}

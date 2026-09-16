@@ -1,0 +1,323 @@
+/* Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0. */
+
+:root {
+  --bg: #0f1115;
+  --bg-raised: #171a21;
+  --bg-hover: #1d212b;
+  --border: #262b36;
+  --text: #e8ebf2;
+  --text-muted: #8b93a5;
+  --accent: #6ea8ff;
+  --accent-strong: #4f8cff;
+  --danger: #ff7a7a;
+  --warn: #ffcf7a;
+  --radius: 12px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- View Transitions (spec §3 Layer 1) -------------------------------- */
+
+::view-transition-old(root) {
+  animation: vt-fade-out 120ms ease-in;
+}
+
+::view-transition-new(root) {
+  animation: vt-fade-in 160ms ease-out;
+}
+
+@keyframes vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---- App shell ---------------------------------------------------------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+}
+
+.brand-name {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.chip--accent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.chip--warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.app-main {
+  flex: 1;
+  padding: 20px 0 32px;
+}
+
+.app-footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- Buttons ------------------------------------------------------------ */
+
+.button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.button:hover {
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.button--small {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.button--ghost {
+  background: transparent;
+}
+
+.button--danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+
+.button--danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-raised));
+}
+
+/* ---- Notes list ---------------------------------------------------------- */
+
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.note-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.note-card:hover {
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.note-title {
+  font-weight: 600;
+}
+
+.note-body {
+  color: var(--text-muted);
+  font-size: 14px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.note-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot--pending {
+  background: var(--warn);
+}
+
+/* ---- Editor --------------------------------------------------------------- */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 60dvh;
+}
+
+.editor-toolbar {
+  display: flex;
+  justify-content: space-between;
+}
+
+.editor-title {
+  font: inherit;
+  font-size: 22px;
+  font-weight: 700;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 2px 10px;
+  outline: none;
+}
+
+.editor-title:focus {
+  border-bottom-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.editor-body {
+  font: inherit;
+  font-size: 15px;
+  color: inherit;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  min-height: 42dvh;
+  resize: vertical;
+  outline: none;
+}
+
+.editor-body:focus {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+/* ---- Misc ----------------------------------------------------------------- */
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pad {
+  padding: 20px;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}

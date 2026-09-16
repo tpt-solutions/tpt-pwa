@@ -1,0 +1,94 @@
+Design Document: tpt-pwa (Progressive Native Web Application)
+1. Executive Summary
+tpt-pwa is an offline-first, app-store-free web application framework. It rejects the false choice between "fragile web APIs" and "walled-garden native apps." By pairing a lightweight Svelte/TypeScript frontend with the tpt-cortex native daemon, it delivers true background processing, persistent local storage, and hardware access, while gracefully degrading to standard Web APIs when the native companion is unavailable.
+2. Core Philosophy
+No App Store Dependency: Distributed via direct web install (PWA) and direct APK download (Android companion).
+First-Principles Dependencies: Replace bloated JS libraries (e.g., heavy ORM/DB wrappers) with lean, purpose-built tools (Rust-compiled Wasm, custom CRDT sync, tpt-cortex DSL).
+Progressive Enhancement, Not Redundancy: The app does not branch into if (iOS) { ... } else { ... }. Instead, it checks: "Is the Cortex Daemon available?" If yes, use native superpowers. If no, gracefully fall back to standard browser Service Workers and IndexedDB.
+3. System Architecture
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER DEVICE                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│  [ Layer 1: tpt-pwa (Svelte + TS) ]                                 │
+│   - Reactive UI, Optimistic Updates, View Transitions               │
+│   - Local State Management (Svelte Stores)                          │
+│   - Feature Detection: `hasCortex = await checkCortexConnection()`  │
+├─────────────────────────────────────────────────────────────────────┤
+│  [ Layer 2: Communication Bridge ]                                  │
+│   - Primary: Secure WebSocket (ws://127.0.0.1:9911) to Cortex Daemon│
+│   - Fallback: Standard Browser APIs (Service Worker + IndexedDB)    │
+├─────────────────────────────────────────────────────────────────────┤
+│  [ Layer 3: tpt-cortex (Native Companion) ]                         │
+│   - cortex-daemon (Go): IPC host, WebSocket server, scheduler       │
+│   - cortex-engine (Rust): Statically-typed DSL VM, bytecode executor│
+│   - Direct OS Access: Background sync, File System, Bluetooth, etc. │
+└─────────────────────────────────────────────────────────────────────┘
+
+4. Solving the "Access Level" Fragmentation
+Instead of writing redundant code for every browser, tpt-pwa uses a Capability Negotiation pattern.
+Scenario: Background Data Sync
+PWA Action: User creates a note offline and closes the tab.
+Capability Check: The PWA attempts to send a cortex.task.enqueue("syncNotes") command via WebSocket.
+Path A (Cortex Available - Android/Desktop): The Go daemon receives the task, holds it in a persistent queue, and executes the Rust VM script the moment the OS reports network connectivity. The PWA is completely decoupled and can be closed.
+Path B (Cortex Unavailable - Vanilla iOS Safari): The WebSocket connection fails. The PWA’s internal Service Worker intercepts the action, saves the note to IndexedDB, and attaches an event listener to window.addEventListener('online', triggerSync). When the user reopens the app, it syncs immediately.
+Result: Zero redundant OS-checking code. The system adapts to the available execution environment.
+5. Building "Better" Dependencies
+We replace standard, heavy web dependencies with first-principles alternatives aligned with your Rust/Go/TS stack:
+Traditional Web Dependency
+tpt-pwa First-Principles Alternative
+Why it’s Better
+Workbox (Heavy SW caching)
+Custom Minimal SW Generator
+A 2KB Service Worker that only does essential Cache-First routing. No complex runtime routing logic in the browser.
+RxDB / WatermelonDB
+wa-sqlite + tpt-cortex Sync
+Run SQLite directly in Wasm for complex local queries. Let tpt-cortex handle the background sync logic natively, bypassing browser memory limits.
+Web Push API
+Cortex Daemon Push Listener
+The Go daemon listens for OS-level notifications (or polls a lightweight endpoint) and injects them into the PWA via WebSocket, bypassing iOS Safari’s restrictive Push requirements.
+Heavy JS State Management
+Svelte Stores + CRDTs
+Svelte’s compiled reactivity is tiny and fast. For multi-device conflict resolution, use a lightweight Rust-compiled CRDT library (e.g., automerge-rs via Wasm).
+6. The tpt-cortex Integration Contract
+The PWA communicates with the daemon using a strict, typed contract (JSON-RPC over WebSocket).
+Example: PWA requesting a native file save
+
+// tpt-pwa: src/lib/cortex-client.ts
+async function saveFileNative(filename: string, data: Uint8Array) {
+  if (!window.cortexConnected) {
+    // Fallback: Standard browser download
+    triggerBrowserDownload(filename, data);
+    return;
+  }
+
+  // Primary: Delegate to native daemon
+  await cortexRPC.call('fs.write', { path: filename, buffer: data });
+}
+
+Example: Cortex DSL Script (sync.ctx)
+
+// Executed by cortex-engine (Rust VM)
+task syncOfflineData() -> void {
+    let pending = native.db.query("SELECT * FROM queue WHERE status = 'pending'");
+    if native.net.isConnected() {
+        for item in pending {
+            native.http.post("https://api.tpt/sync", item);
+            native.db.exec("UPDATE queue SET status = 'synced' WHERE id = ?", item.id);
+        }
+    }
+}
+
+7. Distribution Strategy (No App Store)
+Desktop (Windows/macOS/Linux): Users install the PWA via the browser. Optionally, they can download a tiny tpt-cortex-shell (Tauri-based) installer that bundles the Go daemon and registers a custom protocol (tpt://), making the integration seamless.
+Android: Users install the PWA. They are prompted to download the cortex-android.apk directly from your site. The APK runs the Go daemon as a foreground/background service, bridging the PWA to the Android OS.
+iOS: The PWA works in "Graceful Degradation" mode. It functions as a highly optimized, offline-capable web app using standard Service Workers. Advanced background tasks are queued until the user actively opens the app. (Future: A TestFlight or enterprise-signed companion app could be introduced if absolutely necessary, but the baseline PWA remains fully functional).
+8. Phased Rollout Plan
+Phase 1: Core PWA & Fallbacks: Build the Svelte frontend with robust IndexedDB/Service Worker fallbacks. Ensure it works perfectly as a standalone web app.
+Phase 2: Cortex Daemon Integration: Implement the WebSocket RPC client in the PWA. Connect it to the local cortex-daemon. Migrate one complex feature (e.g., background sync) to the Cortex DSL to prove the pattern.
+Phase 3: Android Companion: Finalize cortex-android to run the daemon as a persistent service, unlocking true background execution on the most open mobile platform.
+Phase 4: Formal Verification: Apply your tpt-telos / formal verification principles to the cortex-engine Rust VM, ensuring the native execution layer is mathematically guaranteed to be memory-safe and crash-resistant.
+Why this works for you:
+It leverages your existing stack: Rust for the heavy/verified lifting (cortex-engine), Go for the concurrent daemon (cortex-daemon), and TS/Svelte for the reactive UI (tpt-pwa).
+It eliminates redundancy: You write the fallback logic once (as a generic capability check), not per-OS.
+It aligns with your ethos: It’s decentralized, avoids walled gardens, uses first-principles dependencies, and pushes the boundary of what open web apps can do.

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0. -->
+<resources>
+    <string name="app_name">tpt-cortex</string>
+    <string name="daemon_notification_channel">Cortex daemon</string>
+    <string name="daemon_notification_title">tpt-cortex running</string>
+    <string name="daemon_notification_text">Background sync and native tasks stay available for the PWA.</string>
+</resources>

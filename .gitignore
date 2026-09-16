@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+target/
+*.tsbuildinfo
+
+# JS/TS
+*.log
+.vite/
+
+# Go
+cortex-daemon/bin/
+cortex-daemon/*.exe
+
+# Rust
+cortex-engine/target/
+
+# Tauri
+cortex-shell/src-tauri/target/
+cortex-shell/src-tauri/gen/
+cortex-shell/src-tauri/binaries/
+
+# Android
+cortex-android/.gradle/
+cortex-android/build/
+cortex-android/app/build/
+local.properties
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Misc
+.env
+.env.*
+!.env.example
+coverage/
+.kilo/

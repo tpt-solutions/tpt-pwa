@@ -1,0 +1,12 @@
+// The background-sync task from spec §6, verbatim. Executed by
+// `cortex-engine run examples/sync.ctx`; exercised end-to-end by the test
+// suite (tests/sync_ctx.rs).
+task syncOfflineData() -> void {
+    let pending = native.db.query("SELECT * FROM queue WHERE status = 'pending'");
+    if native.net.isConnected() {
+        for item in pending {
+            native.http.post("https://api.tpt/sync", item);
+            native.db.exec("UPDATE queue SET status = 'synced' WHERE id = ?", item.id);
+        }
+    }
+}

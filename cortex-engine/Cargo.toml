@@ -1,0 +1,10 @@
+# Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
+[package]
+name = "cortex-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Statically-typed DSL bytecode VM for tpt-cortex task scripts (spec §6)"
+repository = "https://github.com/tpt-solutions/tpt-pwa"
+
+[dependencies]
