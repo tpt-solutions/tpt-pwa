@@ -19,6 +19,36 @@ tpt-pwa/
 
 Progress is tracked in [TODO.md](TODO.md). Contributing? Start with [CONTRIBUTING.md](CONTRIBUTING.md) (dual-license terms) and the shared [JSON-RPC contract](docs/jsonrpc-contract.md). Formal-verification scope for the engine lives in [docs/formal-verification.md](docs/formal-verification.md).
 
+## Quickstart
+
+Prerequisites: Node 22+, pnpm 11, Go 1.25, Rust 1.85+ (stable).
+
+```sh
+pnpm install            # workspace + pwa deps
+pnpm test               # PWA (vitest), daemon (go test), engine (cargo test)
+pnpm dev                # PWA dev server  → http://localhost:5173
+pnpm run dev:daemon     # cortex-daemon   → ws://127.0.0.1:9911/rpc
+```
+
+With both running, the app's header chip flips to **cortex connected** and notes sync through the daemon's persistent queue. Full walk-through with the DSL engine and a mock sync endpoint: [examples/local-sync](examples/local-sync/README.md).
+
+### Daemon configuration (flags)
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-addr` | `127.0.0.1:9911` | Listen address (loopback by design) |
+| `-sync-endpoint` | `https://api.tpt/sync` | Where queued notes are pushed |
+| `-engine` | _(unset)_ | cortex-engine binary → tasks run through the DSL VM instead of the built-in Go executor |
+| `-engine-script` | embedded `sync.ctx` | Alternate DSL script for `-engine` |
+| `-auth-token` | _(unset)_ | Require a shared token on `/rpc` upgrades (`?token=` or `X-Cortex-Token`); browsers should use the query param |
+| `-queue` | OS config dir | Persistent task queue file |
+| `-data-dir` | OS config dir | Sandbox root for `fs.write` |
+| `-poll` / `-max-attempts` | `5s` / `8` | Scheduler cadence and retry ceiling |
+
+There is no `.env` indirection on purpose: the daemon is flag-driven (see `go run ./cortex-daemon/cmd/cortex-daemon -h`) and the PWA needs no configuration.
+
+Install the git hooks (pre-commit mirror of CI): `pnpm run hooks:setup`.
+
 ## License
 
 Licensed under either of

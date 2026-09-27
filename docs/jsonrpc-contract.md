@@ -6,6 +6,7 @@ Shared wire contract between the PWA ([`pwa/src/lib/cortex-client.ts`](../pwa/sr
 - **Framing:** JSON-RPC 2.0, one request or notification per WebSocket message.
 - **Server → client notifications** use bare objects without `id`.
 - **Params are strict:** unknown fields are rejected with `-32602`.
+- **Auth (optional):** when the daemon runs with `-auth-token <t>`, every upgrade must present the token as the `token` query parameter (`ws://127.0.0.1:9911/rpc?token=t` — the browser-friendly path, since WebSocket APIs cannot set headers) or an `X-Cortex-Token` header; otherwise the upgrade is answered `401`. Unset (default) means loopback-trust per spec §3.
 
 ## Error codes
 
@@ -77,7 +78,9 @@ Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <
 // result: { "path": "<absolute path>", "bytesWritten": 42 }
 ```
 
-Paths are resolved inside the daemon's data directory; traversal attempts return `-32602`.
+Paths are resolved inside the daemon's data directory; traversal attempts return `-32602`. Decoded payloads larger than 4 MiB are rejected with `-32602`.
+
+> Not part of this contract: the *internal* line-delimited JSON protocol between the daemon and the cortex-engine VM (`exec-host`), documented in `cortex-engine/src/host.rs`.
 
 ## Server → client notifications
 

@@ -31,6 +31,10 @@ pub enum Expr {
     Lit(Lit),
     Ident(String),
     Member(Box<Expr>, String),
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,

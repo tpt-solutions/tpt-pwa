@@ -1,5 +1,6 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { IndexedDBStorage } from './idb'
+import { warnDev } from '../devlog'
 import { MemoryStorage } from './memory'
 import { SQLiteStorage } from './sqlite'
 import type { NoteStorage } from './types'
@@ -27,9 +28,10 @@ export async function createStorage(): Promise<NoteStorage> {
     try {
       await candidate.init()
       return candidate
-    } catch {
+    } catch (error) {
       // The candidate advertised itself as available but failed to
       // initialise (quota, private mode, broken OPFS): degrade quietly.
+      warnDev('storage', error)
     }
   }
   const lastResort = new MemoryStorage()

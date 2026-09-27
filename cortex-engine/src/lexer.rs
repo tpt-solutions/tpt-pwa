@@ -20,6 +20,8 @@ pub enum Tok {
     In,
     Return,
     Void,
+    True,
+    False,
     // punctuation / operators
     LParen,
     RParen,
@@ -28,6 +30,8 @@ pub enum Tok {
     Comma,
     Semicolon,
     Dot,
+    LBracket,
+    RBracket,
     Question, // '?' inside SQL strings is a plain char; this is for future use
     Arrow,
     Assign,
@@ -121,6 +125,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 "in" => Tok::In,
                 "return" => Tok::Return,
                 "void" => Tok::Void,
+                "true" => Tok::True,
+                "false" => Tok::False,
                 _ => Tok::Ident(word),
             };
             tokens.push(Token {
@@ -241,6 +247,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 bump!();
                 tokens.push(simple(Tok::RBrace));
             }
+            '[' => {
+                bump!();
+                tokens.push(simple(Tok::LBracket));
+            }
+            ']' => {
+                bump!();
+                tokens.push(simple(Tok::RBracket));
+            }
             ',' => {
                 bump!();
                 tokens.push(simple(Tok::Comma));
@@ -347,4 +361,63 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         col,
     });
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenizes_the_sync_script_shape() {
+        let tokens = lex(r#"task t() -> void { let s = "WHERE id = ?"; }"#).expect("lexes");
+        let kinds: Vec<&Tok> = tokens.iter().map(|t| &t.tok).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &Tok::Task,
+                &Tok::Ident("t".into()),
+                &Tok::LParen,
+                &Tok::RParen,
+                &Tok::Arrow,
+                &Tok::Void,
+                &Tok::LBrace,
+                &Tok::Let,
+                &Tok::Ident("s".into()),
+                &Tok::Assign,
+                &Tok::Str("WHERE id = ?".into()),
+                &Tok::Semicolon,
+                &Tok::RBrace,
+                &Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tracks_line_and_column() {
+        let tokens = lex("let a = 1;\nlet b = 2;").expect("lexes");
+        let second_let = tokens
+            .iter()
+            .find(|t| t.tok == Tok::Let && t.line == 2)
+            .expect("second let");
+        assert_eq!(second_let.col, 1);
+    }
+
+    #[test]
+    fn rejects_unterminated_strings_and_bad_chars() {
+        assert!(lex(r#"let s = "oops;"#).is_err());
+        assert!(lex("let $x = 1;").is_err());
+    }
+
+    #[test]
+    fn operators_lex_including_two_char_forms() {
+        let tokens = lex("a == b != c <= d >= e < f > g !h && i || j -> k").expect("lexes");
+        let kinds: Vec<&Tok> = tokens.iter().map(|t| &t.tok).collect();
+        assert!(kinds.contains(&&Tok::Eq));
+        assert!(kinds.contains(&&Tok::NotEq));
+        assert!(kinds.contains(&&Tok::LessEq));
+        assert!(kinds.contains(&&Tok::GreaterEq));
+        assert!(kinds.contains(&&Tok::And));
+        assert!(kinds.contains(&&Tok::Or));
+        assert!(kinds.contains(&&Tok::Arrow));
+    }
 }

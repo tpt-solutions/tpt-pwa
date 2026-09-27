@@ -24,6 +24,8 @@ Every package carries the license in its manifest:
 
 CI runs these per-language, path-filtered (`.github/workflows/ci.yml`). If you touch the wire contract ([docs/jsonrpc-contract.md](docs/jsonrpc-contract.md)), update the PWA client (`pwa/src/lib/cortex-client.ts`), the Go daemon, and the doc in the same PR.
 
+Run `pnpm run hooks:setup` once to enable the pre-commit hook (`scripts/githooks/pre-commit`), a fast subset of CI: svelte-check + vitest for the PWA, gofmt/vet for the daemon, and `cargo fmt --check` for the engine.
+
 ## Ground rules
 
 1. **Capability negotiation, never OS sniffing.** Branch on what the environment can do (`checkCortexConnection()`, storage negotiation), not on user-agent strings (spec §2/§4).

@@ -86,7 +86,10 @@ describe('SyncManager (spec §4 background sync)', () => {
     }) as typeof fetch
     const sync = new SyncManager({ storage, fetchFn: onlineFetch })
 
-    await sync.queueNote(makeNote(), 'create')
+    // Real flow: the note is persisted first, then queued.
+    const note = makeNote()
+    await storage.upsertNote(note)
+    await sync.queueNote(note, 'create')
     const outcome = await sync.flush()
 
     expect(outcome.synced).toBe(1)
@@ -94,6 +97,31 @@ describe('SyncManager (spec §4 background sync)', () => {
     const stored = await storage.getNote('note-1')
     expect(stored?.syncedAt).not.toBeNull()
     expect(await storage.pendingQueue()).toEqual([])
+  })
+
+  it('fallback flush never clobbers a newer local edit with a stale queued payload', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const onlineFetch = (async () => new Response(null, { status: 200 })) as typeof fetch
+    const sync = new SyncManager({ storage, fetchFn: onlineFetch })
+
+    // Queue revision 1, then the user edits the note to revision 2 before
+    // the flush fires. The outbox entry still carries the v1 payload.
+    const v1 = makeNote({ title: 'revision 1', updatedAt: 1000 })
+    const v2 = { ...v1, title: 'revision 2', body: 'newer content', updatedAt: 2000 }
+    await storage.upsertNote(v1)
+    await sync.queueNote(v1, 'create')
+    await storage.upsertNote(v2)
+
+    const outcome = await sync.flush()
+
+    expect(outcome.synced).toBe(1) // the v1 entry pushed fine...
+    const stored = await storage.getNote('note-1')
+    expect(stored?.title).toBe('revision 2') // ...but must not drag content back to v1
+    expect(stored?.body).toBe('newer content')
+    // v2 has its own (unsynced) edit: it stays unsynced rather than being
+    // falsely stamped by the v1 entry.
+    expect(stored?.syncedAt).toBeNull()
   })
 
   it('an `online` event triggers a flush attempt', async () => {

@@ -2,6 +2,7 @@
 import { get } from 'svelte/store'
 import { checkCortexConnection, CortexSyncTransport } from './cortex-client'
 import { NoteDoc } from './crdt'
+import { warnDev } from './devlog'
 import { createStorage } from './storage'
 import type { Note, NoteId, NoteStorage } from './storage'
 import { SyncManager } from './sync'
@@ -44,6 +45,25 @@ async function doInit(): Promise<void> {
         if (document.visibilityState === 'visible') void flushSync()
       })
       online.set(navigator.onLine)
+      // Companion-host relay (cortex-android): the Android service forwards
+      // daemon notifications and link state into this WebView as DOM events,
+      // covering windows where the PWA's own WebSocket is between reconnects.
+      window.addEventListener('cortex:notification', (event) => {
+        const method = (event as CustomEvent<{ method?: string }>).detail?.method
+        if (method === 'cortex.event.taskCompleted') void flushSync()
+      })
+      window.addEventListener('cortex:state', (event) => {
+        const state = (event as CustomEvent<{ state?: string }>).detail?.state
+        if (state === 'connected' || state === 'disconnected') {
+          capabilities.update((c) => ({ ...c, cortex: state === 'connected' }))
+          if (state === 'connected') {
+            sync?.setTransport(new CortexSyncTransport())
+            void flushSync()
+          } else {
+            sync?.setTransport(null)
+          }
+        }
+      })
     }
 
     // Capability check (spec §4): one branch point, no per-OS code anywhere.
@@ -53,8 +73,9 @@ async function doInit(): Promise<void> {
 
     appStatus.set('ready')
     void flushSync()
-  } catch {
+  } catch (error) {
     initPromise = null // allow a retry after a failed bootstrap
+    warnDev('app', error)
     appStatus.set('error')
   }
 }
@@ -107,7 +128,8 @@ export function updateNote(id: NoteId, patch: Partial<Pick<Note, 'title' | 'body
         await sync?.queueNote(note, 'update')
         crdtDoc?.upsertNote(note)
         await bumpPending()
-      } catch {
+      } catch (error) {
+        warnDev('app', error)
         notes.update((list) => list.map((n) => (n.id === id ? snapshot : n)))
       }
     }, SAVE_DEBOUNCE_MS),
@@ -126,7 +148,8 @@ export async function deleteNote(id: NoteId): Promise<void> {
     await sync?.queueNote(removed, 'delete')
     crdtDoc?.removeNote(id)
     await bumpPending()
-  } catch {
+  } catch (error) {
+    warnDev('app', error)
     notes.set([...snapshot.filter((n) => n.id !== id), removed].sort((a, b) => b.updatedAt - a.updatedAt))
     throw new Error('failed to delete note')
   }
@@ -139,8 +162,9 @@ export async function flushSync(): Promise<void> {
     const outcome = await sync.flush()
     pendingSync.set(outcome.pending)
     if (outcome.synced > 0) await refreshNotes()
-  } catch {
+  } catch (error) {
     // Flush is best-effort; entries stay queued for the next trigger.
+    warnDev('sync', error)
   }
 }
 

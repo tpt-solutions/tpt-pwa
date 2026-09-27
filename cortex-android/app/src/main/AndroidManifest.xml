@@ -11,7 +11,7 @@
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
-        android:usesCleartextTraffic="false">
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <!-- Hosts the Go cortex-daemon as a persistent service (spec §7). -->
         <service

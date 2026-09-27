@@ -15,6 +15,7 @@
 pub mod ast;
 pub mod bytecode;
 pub mod compiler;
+pub mod host;
 pub mod lexer;
 pub mod natives;
 pub mod parser;

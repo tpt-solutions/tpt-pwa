@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
+
+     The cortex-daemon speaks plain ws:// on the loopback only; this pins
+     cleartext to exactly 127.0.0.1/localhost so the PWA loaded in the
+     WebView can reach ws://127.0.0.1:9911/rpc while every other destination
+     stays HTTPS-only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

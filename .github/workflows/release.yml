@@ -1,0 +1,38 @@
+# Direct APK distribution for the cortex-android companion (spec §7: no app
+# store). On a version tag, builds the APKs and attaches them to a GitHub
+# release -- the PWA's companion page (pwa/public/companion.html) links
+# there.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: Companion APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cortex-android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew assembleRelease assembleDebug
+      - name: Attach APKs to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "tpt-cortex $GITHUB_REF_NAME" \
+            --notes "Direct-download Android companion (no Play Store). See pwa/public/companion.html for install steps."
+          gh release upload "$GITHUB_REF_NAME" \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            app/build/outputs/apk/debug/app-debug.apk

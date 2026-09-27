@@ -1,5 +1,6 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import type { Note } from './storage'
+import { warnDev } from './devlog'
 
 type AutomergeModule = typeof import('@automerge/automerge-wasm')
 type AutomergeDoc = import('@automerge/automerge-wasm').Automerge
@@ -18,7 +19,10 @@ function loadAutomerge(): Promise<AutomergeModule | null> {
       if (typeof init === 'function') await init()
       return mod
     })
-    .catch(() => null)
+    .catch((error) => {
+      warnDev('crdt', error)
+      return null
+    })
   return modulePromise
 }
 
@@ -51,7 +55,8 @@ export class NoteDoc {
       const existing = doc.getWithType('_root', 'notes')
       const notesId = existing && existing[0] === 'map' ? existing[1] : doc.putObject('_root', 'notes', {})
       return new NoteDoc(doc, notesId)
-    } catch {
+    } catch (error) {
+      warnDev('crdt', error)
       return null
     }
   }
@@ -95,7 +100,8 @@ export class NoteDoc {
       this.#doc.merge(other)
       other.free()
       return true
-    } catch {
+    } catch (error) {
+      warnDev('crdt', error)
       return false
     }
   }

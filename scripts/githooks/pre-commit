@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-commit checks mirroring CI (.github/workflows/ci.yml), fast subset.
+# Install with: pnpm hooks:setup
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "[pre-commit] pwa: svelte-check + vitest"
+(cd pwa && pnpm run check >/dev/null && pnpm run test >/dev/null) || {
+  echo "[pre-commit] pwa checks failed (run: pnpm --filter tpt-pwa check && pnpm --filter tpt-pwa test)" >&2
+  exit 1
+}
+
+if command -v go >/dev/null 2>&1; then
+  echo "[pre-commit] cortex-daemon: gofmt + vet"
+  (cd cortex-daemon &&
+    test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; } &&
+    go vet ./... >/dev/null) || {
+    echo "[pre-commit] daemon checks failed" >&2
+    exit 1
+  }
+fi
+
+if command -v cargo >/dev/null 2>&1; then
+  echo "[pre-commit] cortex-engine: cargo fmt --check"
+  (cd cortex-engine && cargo fmt --check >/dev/null) || {
+    echo "[pre-commit] cargo fmt needed (run: cargo fmt)" >&2
+    exit 1
+  }
+fi
+
+echo "[pre-commit] OK"

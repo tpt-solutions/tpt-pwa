@@ -1,0 +1,17 @@
+{
+  "name": "tpt-pwa-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "dev": "pnpm --filter tpt-pwa dev",
+    "dev:daemon": "go run ./cortex-daemon/cmd/cortex-daemon",
+    "dev:shell": "pnpm --filter cortex-shell dev",
+    "build": "pnpm --filter tpt-pwa build",
+    "check": "pnpm --filter tpt-pwa check",
+    "test": "pnpm --filter tpt-pwa test && cd cortex-daemon && go test ./... && cd ../cortex-engine && cargo test",
+    "icons": "pnpm --filter tpt-pwa icons",
+    "hooks:setup": "git config core.hooksPath scripts/githooks"
+  }
+}

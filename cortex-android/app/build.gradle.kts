@@ -39,4 +39,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.12.1")
+
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json implementation for JVM unit tests (the Android stub
+    // throws "not mocked").
+    testImplementation("org.json:json:20240303")
 }

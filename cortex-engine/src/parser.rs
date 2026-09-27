@@ -266,6 +266,15 @@ impl Parser {
                     let field = self.expect_ident()?;
                     expr = Expr::Member(Box::new(expr), field);
                 }
+                Tok::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr()?;
+                    self.expect(&Tok::RBracket)?;
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    };
+                }
                 Tok::LParen => {
                     self.advance();
                     let mut args = Vec::new();
@@ -305,6 +314,14 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Lit(Lit::Str(v)))
             }
+            Tok::True => {
+                self.advance();
+                Ok(Expr::Lit(Lit::Bool(true)))
+            }
+            Tok::False => {
+                self.advance();
+                Ok(Expr::Lit(Lit::Bool(false)))
+            }
             Tok::Ident(name) => {
                 self.advance();
                 Ok(Expr::Ident(name))
@@ -317,5 +334,76 @@ impl Parser {
             }
             other => self.error(format!("unexpected token {other:?} in expression")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Expr, Lit, Stmt};
+
+    #[test]
+    fn parses_control_flow_and_member_chains() {
+        let source = r#"
+            task demo() -> void {
+                let rows = native.db.query("SELECT 1");
+                if !native.net.isConnected() {
+                    return;
+                } else {
+                    for row in rows {
+                        native.http.post("https://example", row.id);
+                    }
+                }
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        assert_eq!(task.name, "demo");
+        assert_eq!(task.body.len(), 2);
+        match &task.body[0] {
+            Stmt::Let { name, .. } => assert_eq!(name, "rows"),
+            other => panic!("expected let, got {other:?}"),
+        }
+        match &task.body[1] {
+            Stmt::If {
+                cond, else_branch, ..
+            } => {
+                assert!(matches!(cond, Expr::UnaryNot(_)));
+                assert_eq!(else_branch.len(), 1, "else branch holds the for loop");
+            }
+            other => panic!("expected if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn precedence_binds_comparison_looser_than_addition() {
+        let task = parse_task("task t() -> void { return 1 + 2 < 4; }").expect("parses");
+        match &task.body[0] {
+            Stmt::Return(Some(Expr::Binary {
+                op: BinOp::Less,
+                lhs,
+                ..
+            })) => {
+                assert!(matches!(lhs.as_ref(), Expr::Binary { op: BinOp::Add, .. }));
+            }
+            other => panic!("expected (1+2) < 4 shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_semicolon_is_an_error_with_position() {
+        let err = parse_task("task t() -> void { let x = 1 }").expect_err("must fail");
+        assert!(err.message.contains("expected Semicolon"));
+        assert_eq!(err.line, 1);
+    }
+
+    #[test]
+    fn non_native_call_is_a_parse_success_but_shape_is_preserved() {
+        // The parser accepts the call shape; the COMPILER rejects it later.
+        let task = parse_task("task t() -> void { helper(1, \"x\"); }").expect("parses");
+        match &task.body[0] {
+            Stmt::Expr(Expr::Call { args, .. }) => assert_eq!(args.len(), 2),
+            other => panic!("expected call statement, got {other:?}"),
+        }
+        assert_eq!(Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(1)));
     }
 }

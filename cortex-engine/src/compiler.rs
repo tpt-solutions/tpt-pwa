@@ -219,6 +219,11 @@ impl Compiler {
                 })?;
                 self.emit(Instr::LoadLocal(slot));
             }
+            Expr::Index { object, index } => {
+                self.expr(object)?;
+                self.expr(index)?;
+                self.emit(Instr::ListGet);
+            }
             Expr::Member(object, field) => {
                 // Compile-time resolution of `native.<sub>.<call>` chains:
                 // known ones are reserved, unknown ones are rejected, and any
@@ -299,5 +304,80 @@ fn flatten_member_chain(expr: &Expr) -> Option<Vec<String>> {
             Some(path)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_task;
+
+    #[test]
+    fn allocates_distinct_slots_and_resolves_scopes() {
+        let task = parse_task("task t() -> void { let a = 1; if true { let b = 2; } let c = a; }")
+            .expect("parses");
+        let program = compile(&task).expect("compiles");
+        // a, b, c each get a slot; `c = a` resolves a's slot, proving scope
+        // lookup across the closed if-block.
+        assert_eq!(program.locals, 3);
+        let stores: Vec<_> = program
+            .code
+            .iter()
+            .filter(|instr| matches!(instr, Instr::StoreLocal(_)))
+            .collect();
+        assert_eq!(stores.len(), 3);
+    }
+
+    #[test]
+    fn if_compiles_to_patched_jump_to_end() {
+        let task = parse_task("task t() -> void { if false { return; } }").expect("parses");
+        let program = compile(&task).expect("compiles");
+        let jump = program
+            .code
+            .iter()
+            .find(|instr| matches!(instr, Instr::JumpIfFalse(_)))
+            .expect("conditional jump present");
+        // The patched target must be the Return's index, not 0.
+        let return_index = program
+            .code
+            .iter()
+            .position(|i| *i == Instr::Return)
+            .expect("return present");
+        match jump {
+            // The branch exits to just past the then-branch's final Return
+            // (which is followed by the task's implicit trailing Return).
+            Instr::JumpIfFalse(target) => assert_eq!(*target as usize, return_index + 1),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calling_a_non_native_is_a_compile_error() {
+        // Parsing accepts the call shape; compiling rejects it.
+        let task = parse_task("task t() -> void { for x in items() { } }").expect("parses");
+        let err = compile(&task).expect_err("items() is not a native");
+        assert!(err.message.contains("only native.* calls"));
+    }
+
+    #[test]
+    fn native_call_compiles_to_call_native() {
+        let task =
+            parse_task("task t() -> void { let ok = native.net.isConnected(); }").expect("parses");
+        let program = compile(&task).expect("compiles");
+        assert!(program.code.iter().any(|i| matches!(
+            i,
+            Instr::CallNative {
+                native: NativeId::NetIsConnected,
+                argc: 0
+            }
+        )));
+    }
+
+    #[test]
+    fn unknown_natives_and_bare_natives_are_compile_time_errors() {
+        let bad = parse_task("task t() -> void { native.db.dropAll(); }").expect("parses");
+        assert!(compile(&bad).is_err());
+        let bare = parse_task("task t() -> void { let f = native.db.query; }").expect("parses");
+        assert!(compile(&bare).is_err());
     }
 }

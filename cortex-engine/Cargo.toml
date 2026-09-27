@@ -8,3 +8,4 @@ description = "Statically-typed DSL bytecode VM for tpt-cortex task scripts (spe
 repository = "https://github.com/tpt-solutions/tpt-pwa"
 
 [dependencies]
+serde_json = "1"

@@ -1,5 +1,6 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import type { Note, NoteStorage, SyncOutboxAction, SyncOutboxEntry } from './storage'
+import { warnDev } from './devlog'
 
 /**
  * How completed outbox entries leave the device. Two implementations exist,
@@ -74,7 +75,7 @@ export class SyncManager {
   }
 
   #triggerFlush = (): void => {
-    void this.flush().catch(() => {})
+    void this.flush().catch((error) => warnDev('sync', error))
   }
 
   /** Durably queue one note mutation. `delete` carries only the id. */
@@ -109,8 +110,9 @@ export class SyncManager {
         await this.#transport.enqueueSyncTask(entries)
         await Promise.all(entries.map((entry) => this.#storage.dequeue(entry.id)))
         return { via: 'cortex', synced: entries.length, failed: 0, pending: 0 }
-      } catch {
+      } catch (error) {
         // Daemon accepted the connection but dropped mid-handoff: degrade.
+        warnDev('sync', error)
       }
     }
 
@@ -127,14 +129,34 @@ export class SyncManager {
         })
         if (!response.ok) throw new Error(`sync endpoint returned HTTP ${response.status}`)
         await this.#storage.dequeue(entry.id)
-        if (entry.action !== 'delete' && 'title' in entry.payload) {
-          await this.#storage.upsertNote({ ...entry.payload, syncedAt: Date.now() })
-        }
         synced++
-      } catch {
+        try {
+          await this.#markSynced(entry)
+        } catch (error) {
+          warnDev('sync', error) // stamped best-effort; content is already pushed
+        }
+      } catch (error) {
+        warnDev('sync', error)
         failed++
       }
     }
     return { via: 'http', synced, failed, pending: failed }
+  }
+
+  /**
+   * Stamp `syncedAt` on the stored note -- never rewrite its content. The
+   * queued payload may be stale (the user may have edited the note after this
+   * entry was enqueued; a newer entry then sits behind it in the outbox), so
+   * copying `entry.payload` back into storage could clobber newer local
+   * edits. We only stamp when storage holds a revision this entry actually
+   * synced (same or older `updatedAt`); a newer stored revision is left for
+   * its own outbox entry to stamp.
+   */
+  async #markSynced(entry: SyncOutboxEntry): Promise<void> {
+    if (entry.action === 'delete' || !('title' in entry.payload)) return
+    const stored = await this.#storage.getNote(entry.payload.id)
+    if (!stored || stored.updatedAt > entry.payload.updatedAt) return
+    if (stored.syncedAt !== null) return
+    await this.#storage.upsertNote({ ...stored, syncedAt: Date.now() })
   }
 }

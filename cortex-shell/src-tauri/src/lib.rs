@@ -62,3 +62,23 @@ fn spawn_daemon_sidecar(app: tauri::AppHandle) {
 fn log_stdout(message: &str) {
     println!("[cortex-daemon] {message}");
 }
+
+#[cfg(test)]
+mod tests {
+    //! Baseline tests: pin the bundle configuration (sidecar daemon and the
+    //! tpt:// scheme) so packaging regressions fail `cargo test`, not the
+    //! installer.
+
+    #[test]
+    fn tauri_conf_registers_tpt_scheme_and_daemon_sidecar() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json parses");
+        let schemes = conf["plugins"]["deep-link"]["desktop"]["schemes"]
+            .as_array()
+            .expect("deep-link schemes configured");
+        assert_eq!(schemes[0], "tpt");
+        let sidecar = conf["bundle"]["externalBin"]
+            .as_array()
+            .expect("externalBin configured");
+        assert_eq!(sidecar[0], "binaries/cortex-daemon");
+    }
+}

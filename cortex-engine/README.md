@@ -7,6 +7,11 @@ cargo test                     # unit + integration + safety tests
 cargo run -- run examples/sync.ctx
 ```
 
+## Two execution modes
+
+- `cortex-engine run <script.ctx>` — execute against the scripted in-memory environment (`MemoryNative`); used by tests and for local checks.
+- `cortex-engine exec-host --script <script.ctx>` — execute with every `native.*` call served by the **parent process** over a line-delimited JSON protocol on stdio (`src/host.rs`): the engine emits `{"id":1,"method":"http.post","params":[…]}` and blocks on `{"id":1,"result":…}`. This is how the Go daemon executes tasks through the real VM (`cortex-daemon/internal/engineexec`) while the VM core stays pure I/O-free. The protocol has an integration test that spawns the actual binary (`tests/host_protocol.rs`).
+
 ## Layout
 
 | Module | Role |

@@ -354,3 +354,123 @@ fn type_mismatch(expected: &'static str, lhs: &Value, rhs: &Value) -> VmError {
     };
     VmError::TypeMismatch { expected, found }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::compile;
+    use crate::natives::{row, MemoryNative, NativeRegistry};
+    use crate::parser::parse_task;
+
+    fn run(source: &str) -> Result<Value, VmError> {
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative::default();
+        Vm::new(program, &mut env, &registry).run()
+    }
+
+    #[test]
+    fn arithmetic_and_comparisons_evaluate() {
+        assert_eq!(
+            run("task t() -> void { return 10 - 2 + 1; }").unwrap(),
+            Value::Int(9)
+        );
+        assert_eq!(
+            run("task t() -> void { return 1 + 2 < 4; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return \"a\" + \"b\" == \"ab\"; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return !false; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return true && 1 < 2; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return false || 0; }").unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn integer_overflow_is_an_error_not_a_panic() {
+        let err =
+            run("task t() -> void { return 9223372036854775807 + 1; }").expect_err("must overflow");
+        assert_eq!(err, VmError::BadProgram("integer overflow"));
+    }
+
+    #[test]
+    fn member_access_reads_maps_and_lists() {
+        let source = r#"
+            task t() -> void {
+                let rows = native.db.query("SELECT 1");
+                let first = rows[0];
+                return first.id;
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: vec![row(&[("id", Value::Str("41".into()))])],
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry);
+        assert_eq!(vm.run().unwrap(), Value::Str("41".into()));
+    }
+
+    #[test]
+    fn undefined_member_is_a_runtime_error() {
+        // One pending row, so indexing succeeds and the *member* lookup fails.
+        let source = r#"
+            task t() -> void {
+                let rows = native.db.query("SELECT 1");
+                return rows[0].missing;
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: vec![row(&[("id", Value::Str("41".into()))])],
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry);
+        assert_eq!(
+            vm.run().unwrap_err(),
+            VmError::UndefinedMember {
+                field: "missing".into()
+            }
+        );
+    }
+
+    #[test]
+    fn budget_bounds_even_long_loops() {
+        // A for-in over a big list with a tiny budget: must stop, not grind.
+        let task = parse_task(
+            "task t() -> void { let rows = native.db.query(\"s\"); for r in rows { let x = r; } }",
+        )
+        .expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: (0..1000).map(Value::Int).collect(),
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry).with_budget(50);
+        assert_eq!(vm.run().unwrap_err(), VmError::BudgetExhausted);
+    }
+
+    #[test]
+    fn type_confusions_return_errors() {
+        assert!(run("task t() -> void { return 1 + \"a\"; }").is_err());
+        assert!(run("task t() -> void { return 1 < \"x\"; }").is_err());
+        assert!(run("task t() -> void { let x = 1; return x.field; }").is_err());
+    }
+}

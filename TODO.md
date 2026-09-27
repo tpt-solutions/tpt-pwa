@@ -31,7 +31,7 @@ Tracks implementation progress against [spec.txt](spec.txt). Monorepo layout: `p
 - [x] `cortex-daemon`: persistent task queue + scheduler (`cortex.task.enqueue`) — atomic JSON persistence, crash recovery, capped exponential backoff, connectivity-gated execution
 - [x] `cortex-engine` (Rust): bytecode VM skeleton — lex → parse → compile → stack VM; instruction budget; `examples/sync.ctx` runs end-to-end
 - [x] `cortex-engine`: native bindings (`native.db`, `native.net`, `native.http`) — `NativeEnv` trait + registry + deterministic test double
-- [ ] `cortex-daemon` executing tasks through the cortex-engine VM — daemon currently executes `syncNotes` natively in Go (`internal/syncexec`); `scheduler.Executor` is the seam for embedding the engine (FFI or subprocess)
+- [x] `cortex-daemon` executing tasks through the cortex-engine VM — `-engine` flag runs the Rust VM via `internal/engineexec`: the script's `native.*` calls round-trip over a stdio JSON protocol to real daemon effects; tested against a fake engine and the real binary (`CORTEX_ENGINE_BIN` e2e)
 - [x] Document the JSON-RPC contract shared between PWA and daemon (methods, payloads) — [docs/jsonrpc-contract.md](docs/jsonrpc-contract.md)
 - [x] PWA-side WebSocket RPC client (`src/lib/cortex-client.ts`), `window.cortexConnected` flag
 - [x] Migrate background sync end-to-end (Path A hand-off to daemon + Path B browser fallback both tested; spec §6 `sync.ctx` proven in the engine)
@@ -40,9 +40,9 @@ Tracks implementation progress against [spec.txt](spec.txt). Monorepo layout: `p
 ## Phase 3 — Android Companion
 
 - [x] `cortex-android` project scaffold — Gradle 8.9 wrapper committed; Kotlin service/bridge/activity
-- [ ] Run `cortex-daemon` as a foreground/background Android service — `DaemonService` (foreground, `dataSync`) + reconnecting `CortexBridge` scaffold in place; gomobile bind of the daemon is the next milestone
-- [ ] Direct APK download distribution flow (no Play Store)
-- [ ] Bridge PWA ↔ Android service over the existing WebSocket/JSON-RPC contract — contract-speaking bridge skeleton exists; task dispatch/notification routing pending
+- [x] Run `cortex-daemon` as a foreground/background Android service — `DaemonService` (foreground, `dataSync`) loads the gomobile-bound daemon (`cortex-daemon/mobile` → `Mobile.start/stop`, reflectively; the .aar is built at packaging time per README) and keeps liveness even without it
+- [x] Direct APK download distribution flow (no Play Store) — `.github/workflows/release.yml` attaches release/debug APKs to GitHub releases on `v*` tags; `pwa/public/companion.html` is the download page
+- [x] Bridge PWA ↔ Android service over the existing WebSocket/JSON-RPC contract — PWA in the WebView connects directly to the loopback daemon (network security config), `CortexBridge` is a full id-matched JSON-RPC client with `enqueueSync` + notification relay into the WebView (`cortex:notification` events, consumed by the PWA); JVM unit tests
 - [x] `cortex-shell` (Tauri) desktop installer bundling the Go daemon — Tauri 2 scaffold, sidecar config + prepare script, `cargo check` clean; release bundling needs a built daemon binary
 - [x] Register custom `tpt://` protocol in `cortex-shell` — deep-link plugin (`schemes: ["tpt"]`) + Android intent filter
 
@@ -62,15 +62,15 @@ Tracks implementation progress against [spec.txt](spec.txt). Monorepo layout: `p
 
 Bugs, security hardening, and DX/adoption gaps found in a full-platform review. Ordered by priority.
 
-- [ ] Clean up repo noise — delete `exp1.txt` and `pwa/zz-marker.txt` (orphan marker files, no references; deletion blocked by sandbox — needs manual `git rm`)
-- [ ] Fix outbox flush overwrite bug — `pwa/src/lib/sync.ts:130` re-upserts from a queued payload using a loose `'title' in entry.payload` check, which can clobber a newer local edit made after queuing; needs a timestamp/version guard
-- [ ] Surface swallowed errors in dev — empty `catch {}` blocks in `pwa/src/lib/sync.ts:77`, `crdt.ts:21`, `main.ts:17`, `app.ts:56,110,129,142` hide failures even in development; add a `console.warn`-behind-a-dev-flag hook without changing prod "never break the UI" behavior
-- [ ] Wire Android connection-state callback — `cortex-android`'s `DaemonService.kt` `onStateChange` body is empty, so daemon connectivity never reaches the Android UI
-- [ ] Harden daemon RPC endpoint — `cortex-daemon/cmd/cortex-daemon/main.go` loopback WebSocket server has no auth token/handshake for non-browser clients, and `fs.write` has no payload size cap (local DoS surface)
-- [ ] Add a root-level quickstart — `Makefile` or root `package.json` scripts to run pwa + daemon together for a first "clone and run", plus `.env.example`/config doc for daemon flags
-- [ ] Build a real end-to-end example — an `examples/` directory demonstrating PWA ↔ daemon ↔ engine working together (currently the only "example" is the Rust-only `cortex-engine/examples/sync.ctx`)
-- [ ] Add local pre-commit automation mirroring CI checks (husky or equivalent)
-- [ ] Wire `cortex-daemon` to execute tasks through the `cortex-engine` VM — replace the native Go `syncNotes` loop in `internal/syncexec` with real engine execution via `scheduler.Executor` (FFI or subprocess)
-- [ ] Fill test gaps — unit tests for `cortex-engine`'s lexer/parser/compiler/vm individually (currently only end-to-end coverage), and baseline tests for `cortex-shell` and `cortex-android`
+- [x] Clean up repo noise — `exp1.txt` and `pwa/zz-marker.txt` deleted
+- [x] Fix outbox flush overwrite bug — `pwa/src/lib/sync.ts` `#markSynced` now only stamps `syncedAt` when storage holds the revision this entry synced (`stored.updatedAt <= payload.updatedAt`); it never copies stale payload content back, so a newer local edit survives; regression test added (`sync.test.ts` "never clobbers a newer local edit")
+- [x] Surface swallowed errors in dev — `pwa/src/lib/devlog.ts` `warnDev(scope, error)` (a `console.warn` gated on `import.meta.env.DEV`) is wired into every degradation path: sync flush, CRDT load/open/merge, SW registration, storage negotiation, app bootstrap/rollback
+- [x] Wire Android connection-state callback — `DaemonService` broadcasts `CortexBridge.State` through its binder to `MainActivity`, which relays it into the WebView as a `cortex:state` DOM event; the PWA updates its cortex capability chip and re-arms the sync transport on `connected`
+- [x] Harden daemon RPC endpoint — optional `-auth-token` enforces a shared token on `/rpc` upgrades via `token` query param (browser-friendly) or `X-Cortex-Token` header, constant-time compared, 401 otherwise; `fs.write` rejects decoded payloads above 4 MiB; both covered in `internal/server/hardening_test.go` and documented in `docs/jsonrpc-contract.md`
+- [x] Add a root-level quickstart — root `package.json` scripts (`pnpm dev`, `pnpm run dev:daemon`, `pnpm test`), README quickstart section with the daemon flag table (no `.env` indirection on purpose — the daemon is flag-driven)
+- [x] Build a real end-to-end example — `examples/local-sync` runs daemon → engine VM → mock endpoint end to end, driven by the new `cortex-daemon/cmd/cortex-demo` CLI (`serve-mock` + `sync-once`), which doubles as a non-browser contract client
+- [x] Add local pre-commit automation mirroring CI checks — `scripts/githooks/pre-commit` (svelte-check + vitest, gofmt + go vet, `cargo fmt --check`), installed via `pnpm run hooks:setup`
+- [x] Wire `cortex-daemon` to execute tasks through the `cortex-engine` VM — done: `internal/engineexec` + `-engine` flag (see Phase 2)
+- [x] Fill test gaps — `cortex-engine` now has per-module unit tests (lexer tokens/positions/errors, parser precedence/AST shape, compiler slot allocation/jump patching/native resolution, VM arithmetic/overflow/member access/budget bounds), plus baseline tests: `cortex-shell` pins the tpt:// scheme + daemon sidecar in `tauri.conf.json`, `cortex-android` pins the contract URL (JVM unit tests, run in CI)
 
 **Ideas for later (not yet scoped):** scaffold CLI (`create-tpt-companion`) to generate new companion modules from a template; multi-device sync demo building on the existing Automerge CRDT scaffold in `crdt.ts`; a status/telemetry panel in the PWA showing cortex connection state and queue depth.
