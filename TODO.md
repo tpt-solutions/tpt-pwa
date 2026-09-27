@@ -57,3 +57,20 @@ Tracks implementation progress against [spec.txt](spec.txt). Monorepo layout: `p
 - [x] Add `"license": "MIT OR Apache-2.0"` to `package.json` files once they exist
 - [x] Add `license = "MIT OR Apache-2.0"` to `Cargo.toml` files once they exist
 - [x] Contribution guidelines noting dual-license terms for external PRs — [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Platform Review Follow-ups (2026-09-27)
+
+Bugs, security hardening, and DX/adoption gaps found in a full-platform review. Ordered by priority.
+
+- [ ] Clean up repo noise — delete `exp1.txt` and `pwa/zz-marker.txt` (orphan marker files, no references; deletion blocked by sandbox — needs manual `git rm`)
+- [ ] Fix outbox flush overwrite bug — `pwa/src/lib/sync.ts:130` re-upserts from a queued payload using a loose `'title' in entry.payload` check, which can clobber a newer local edit made after queuing; needs a timestamp/version guard
+- [ ] Surface swallowed errors in dev — empty `catch {}` blocks in `pwa/src/lib/sync.ts:77`, `crdt.ts:21`, `main.ts:17`, `app.ts:56,110,129,142` hide failures even in development; add a `console.warn`-behind-a-dev-flag hook without changing prod "never break the UI" behavior
+- [ ] Wire Android connection-state callback — `cortex-android`'s `DaemonService.kt` `onStateChange` body is empty, so daemon connectivity never reaches the Android UI
+- [ ] Harden daemon RPC endpoint — `cortex-daemon/cmd/cortex-daemon/main.go` loopback WebSocket server has no auth token/handshake for non-browser clients, and `fs.write` has no payload size cap (local DoS surface)
+- [ ] Add a root-level quickstart — `Makefile` or root `package.json` scripts to run pwa + daemon together for a first "clone and run", plus `.env.example`/config doc for daemon flags
+- [ ] Build a real end-to-end example — an `examples/` directory demonstrating PWA ↔ daemon ↔ engine working together (currently the only "example" is the Rust-only `cortex-engine/examples/sync.ctx`)
+- [ ] Add local pre-commit automation mirroring CI checks (husky or equivalent)
+- [ ] Wire `cortex-daemon` to execute tasks through the `cortex-engine` VM — replace the native Go `syncNotes` loop in `internal/syncexec` with real engine execution via `scheduler.Executor` (FFI or subprocess)
+- [ ] Fill test gaps — unit tests for `cortex-engine`'s lexer/parser/compiler/vm individually (currently only end-to-end coverage), and baseline tests for `cortex-shell` and `cortex-android`
+
+**Ideas for later (not yet scoped):** scaffold CLI (`create-tpt-companion`) to generate new companion modules from a template; multi-device sync demo building on the existing Automerge CRDT scaffold in `crdt.ts`; a status/telemetry panel in the PWA showing cortex connection state and queue depth.
