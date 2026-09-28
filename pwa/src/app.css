@@ -299,6 +299,45 @@ h2 {
   border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
 }
 
+/* ---- Status panel --------------------------------------------------------- */
+
+.status-panel {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+  margin-bottom: 8px;
+}
+
+.status-panel summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+}
+
+.status-panel summary:hover {
+  color: var(--text);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 12px 0 4px;
+  font-size: 13px;
+}
+
+.status-grid dt {
+  color: var(--text-muted);
+}
+
+.status-grid dd {
+  margin: 0;
+}
+
+.status-grid .ok {
+  color: var(--accent);
+}
+
 /* ---- Misc ----------------------------------------------------------------- */
 
 .card {

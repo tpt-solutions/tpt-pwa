@@ -1,12 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { installPrompt, appStatus, capabilities, notes, online, pendingSync } from './lib/stores'
-  import { createNote, deleteNote, updateNote } from './lib/app'
+  import {
+    installPrompt,
+    appStatus,
+    capabilities,
+    daemonTasks,
+    daemonVersion,
+    lastFlush,
+    notes,
+    online,
+    pendingSync,
+  } from './lib/stores'
+  import { createNote, deleteNote, refreshTelemetry, updateNote } from './lib/app'
+  import { describeOutcome } from './lib/telemetry'
   import type { Note } from './lib/storage'
 
   type View = { name: 'list' } | { name: 'editor'; id: string }
 
   let view = $state<View>({ name: 'list' })
+  let statusOpen = $state(false)
 
   function findSelected(notesList: Note[], current: View): Note | null {
     if (current.name !== 'editor') return null
@@ -19,6 +31,12 @@
       $capabilities.storageBackend ?? 'memory'
     ],
   )
+
+  /** The status panel pulls fresh daemon telemetry whenever it opens. */
+  function toggleStatus(event: Event): void {
+    statusOpen = (event.currentTarget as HTMLDetailsElement).open
+    if (statusOpen) void refreshTelemetry()
+  }
 
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   const formatWhen = (ts: number) => dateFormat.format(new Date(ts))
@@ -178,6 +196,43 @@
       </section>
     {/if}
   </main>
+
+  <details class="status-panel" ontoggle={toggleStatus}>
+    <summary>Status &amp; telemetry</summary>
+    <dl class="status-grid">
+      <dt>daemon</dt>
+      <dd>
+        {#if $capabilities.cortex}
+          <span class="ok">connected</span>{#if $daemonVersion}&nbsp;·&nbsp;v{$daemonVersion}{/if}
+        {:else}
+          <span class="muted">not connected — fallback mode</span>
+        {/if}
+      </dd>
+      <dt>queue depth</dt>
+      <dd>{$pendingSync} {$pendingSync === 1 ? 'entry' : 'entries'} in the local outbox</dd>
+      <dt>last sync</dt>
+      <dd>{describeOutcome($lastFlush)}</dd>
+      <dt>storage</dt>
+      <dd>{backendLabel}</dd>
+      <dt>crdt</dt>
+      <dd>{$capabilities.crdt ? 'ready (automerge Wasm)' : 'unavailable'}</dd>
+      <dt>daemon tasks</dt>
+      <dd>
+        {#if $capabilities.cortex && $daemonTasks}
+          {#if $daemonTasks.queued + $daemonTasks.running + $daemonTasks.completed + $daemonTasks.failed === 0}
+            none yet
+          {:else}
+            {$daemonTasks.queued} queued · {$daemonTasks.running} running · {$daemonTasks.completed} completed ·
+            {$daemonTasks.failed} failed
+          {/if}
+        {:else if $capabilities.cortex}
+          <span class="muted">…</span>
+        {:else}
+          <span class="muted">requires the daemon</span>
+        {/if}
+      </dd>
+    </dl>
+  </details>
 
   <footer class="app-footer">
     <span>storage: {backendLabel}</span>

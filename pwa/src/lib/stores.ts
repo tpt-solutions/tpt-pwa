@@ -1,6 +1,8 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { writable } from 'svelte/store'
 import type { Note, NoteStorage } from './storage'
+import type { FlushOutcome } from './sync'
+import type { TaskSummary } from './telemetry'
 
 export type AppStatus = 'loading' | 'ready' | 'error'
 
@@ -29,3 +31,10 @@ export const online = writable(true)
 /** Captured `beforeinstallprompt` event, or null once installed / unsupported. */
 export type InstallPrompt = { prompt: () => Promise<void> }
 export const installPrompt = writable<InstallPrompt | null>(null)
+
+/** Telemetry for the status panel: daemon identity and its queue's shape. */
+export const daemonVersion = writable<string | null>(null)
+export const daemonTasks = writable<TaskSummary | null>(null)
+
+/** Result of the most recent outbox flush (null = none this session). */
+export const lastFlush = writable<FlushOutcome | null>(null)

@@ -32,6 +32,16 @@ function loadAutomerge(): Promise<AutomergeModule | null> {
  * replicas converge regardless of delivery order -- conflict resolution
  * without a central arbitrator.
  *
+ * Layout: each note is a map of scalar fields, keyed by note id DIRECTLY in
+ * the document root. (A dedicated `_root.notes` container would be created
+ * independently by every fresh replica, and concurrent creation of that one
+ * key would make merges pick a single winner -- dropping the other side's
+ * notes. The root map always exists, so notes land in a pre-merged place.)
+ *
+ * `upsertNote` reuses a note's existing field map, so concurrent edits to
+ * DIFFERENT fields merge field-by-field; concurrent edits to the same field
+ * resolve last-writer-wins.
+ *
  * Scaffold for future multi-device sync: the daemon will ferry these opaque
  * binaries between devices (cortex.task kind "crdtMerge"); local persistence
  * still lives in SQLite/IndexedDB. The UI treats this as a pure enhancement
@@ -39,11 +49,9 @@ function loadAutomerge(): Promise<AutomergeModule | null> {
  */
 export class NoteDoc {
   #doc: AutomergeDoc
-  #notesId: string
 
-  private constructor(doc: AutomergeDoc, notesId: string) {
+  private constructor(doc: AutomergeDoc) {
     this.#doc = doc
-    this.#notesId = notesId
   }
 
   /** Open a doc, optionally from a previously saved binary. Returns `null` when Wasm is unavailable. */
@@ -52,9 +60,7 @@ export class NoteDoc {
     if (!mod) return null
     try {
       const doc = binary ? mod.load(binary) : mod.create()
-      const existing = doc.getWithType('_root', 'notes')
-      const notesId = existing && existing[0] === 'map' ? existing[1] : doc.putObject('_root', 'notes', {})
-      return new NoteDoc(doc, notesId)
+      return new NoteDoc(doc)
     } catch (error) {
       warnDev('crdt', error)
       return null
@@ -62,7 +68,8 @@ export class NoteDoc {
   }
 
   upsertNote(note: Note): void {
-    const fieldsId = this.#doc.putObject(this.#notesId, note.id, {})
+    const existing = this.#doc.getWithType('_root', note.id)
+    const fieldsId = existing && existing[0] === 'map' ? existing[1] : this.#doc.putObject('_root', note.id, {})
     this.#doc.put(fieldsId, 'title', note.title)
     this.#doc.put(fieldsId, 'body', note.body)
     this.#doc.put(fieldsId, 'createdAt', note.createdAt)
@@ -71,15 +78,16 @@ export class NoteDoc {
   }
 
   removeNote(id: string): void {
-    this.#doc.delete(this.#notesId, id)
+    this.#doc.delete('_root', id)
   }
 
   /** Snapshot of every note currently in the CRDT, newest first. */
   notes(): Note[] {
     const notes: Note[] = []
-    for (const id of this.#doc.keys(this.#notesId)) {
-      const fieldsId = this.#doc.get(this.#notesId, id)
-      if (typeof fieldsId !== 'string') continue
+    for (const id of this.#doc.keys('_root')) {
+      const existing = this.#doc.getWithType('_root', id)
+      if (!existing || existing[0] !== 'map') continue
+      const fieldsId = existing[1]
       const title = this.#doc.get(fieldsId, 'title')
       const body = this.#doc.get(fieldsId, 'body')
       const createdAt = this.#doc.get(fieldsId, 'createdAt')

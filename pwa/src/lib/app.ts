@@ -1,12 +1,13 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { get } from 'svelte/store'
-import { checkCortexConnection, CortexSyncTransport } from './cortex-client'
+import { checkCortexConnection, cortexRPC, CortexSyncTransport } from './cortex-client'
 import { NoteDoc } from './crdt'
 import { warnDev } from './devlog'
 import { createStorage } from './storage'
 import type { Note, NoteId, NoteStorage } from './storage'
 import { SyncManager } from './sync'
-import { appStatus, capabilities, notes, online, pendingSync } from './stores'
+import { summarizeTasks } from './telemetry'
+import { appStatus, capabilities, daemonTasks, daemonVersion, lastFlush, notes, online, pendingSync } from './stores'
 
 let storage: NoteStorage | null = null
 let sync: SyncManager | null = null
@@ -57,9 +58,12 @@ async function doInit(): Promise<void> {
         if (state === 'connected' || state === 'disconnected') {
           capabilities.update((c) => ({ ...c, cortex: state === 'connected' }))
           if (state === 'connected') {
+            void refreshTelemetry()
             sync?.setTransport(new CortexSyncTransport())
             void flushSync()
           } else {
+            daemonVersion.set(null)
+            daemonTasks.set(null)
             sync?.setTransport(null)
           }
         }
@@ -69,7 +73,10 @@ async function doInit(): Promise<void> {
     // Capability check (spec §4): one branch point, no per-OS code anywhere.
     const cortexConnected = await checkCortexConnection()
     capabilities.update((c) => ({ ...c, cortex: cortexConnected }))
-    if (cortexConnected && sync) sync.setTransport(new CortexSyncTransport())
+    if (cortexConnected) {
+      void refreshTelemetry()
+      if (sync) sync.setTransport(new CortexSyncTransport())
+    }
 
     appStatus.set('ready')
     void flushSync()
@@ -155,16 +162,34 @@ export async function deleteNote(id: NoteId): Promise<void> {
   }
 }
 
-/** Drain the outbox now; updates the pending count with the authoritative result. */
+/** Drain the outbox now; updates the pending count and telemetry with the authoritative result. */
 export async function flushSync(): Promise<void> {
   if (!sync) return
   try {
     const outcome = await sync.flush()
     pendingSync.set(outcome.pending)
+    lastFlush.set(outcome)
     if (outcome.synced > 0) await refreshNotes()
   } catch (error) {
     // Flush is best-effort; entries stay queued for the next trigger.
     warnDev('sync', error)
+  }
+}
+
+/**
+ * Refresh the status panel's daemon telemetry: identity (via the contract's
+ * ping) and the queue's shape (task.list). Best-effort -- the panel shows
+ * stale data or blanks when the daemon is gone, never an error UI.
+ */
+export async function refreshTelemetry(): Promise<void> {
+  if (!cortexRPC.connected) return
+  try {
+    const pong = (await cortexRPC.call<{ pong?: boolean; version?: string }>('cortex.ping')) ?? {}
+    daemonVersion.set(pong.version ?? 'unknown')
+    const listing = (await cortexRPC.call<{ tasks?: Array<{ state?: string }> }>('cortex.task.list')) ?? {}
+    daemonTasks.set(summarizeTasks((listing.tasks ?? []).map((t) => ({ state: String(t.state ?? 'queued') }))))
+  } catch (error) {
+    warnDev('telemetry', error)
   }
 }
 
