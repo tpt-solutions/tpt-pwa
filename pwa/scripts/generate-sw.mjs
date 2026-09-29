@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /**
  * An asset manifest entry: repo-relative path plus its bytes.
@@ -135,4 +135,8 @@ function walk(dir, base = '') {
   return entries
 }
 
-main()
+// Only run the generator when executed directly: the test suite imports
+// buildWorker() and must not depend on a dist/ existing.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main()
+}
