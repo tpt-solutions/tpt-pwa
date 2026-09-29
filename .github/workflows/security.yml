@@ -43,7 +43,10 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      # Audit-only job: no shell build, so allow the placeholder sidecar.
       - run: pnpm install --frozen-lockfile
+        env:
+          CORTEX_SIDECAR_ALLOW_PLACEHOLDER: "1"
       - run: pnpm audit --prod --audit-level high
 
   version-sync:

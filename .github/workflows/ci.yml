@@ -62,7 +62,10 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      # --filter keeps the install scoped to the PWA project: a workspace-wide
+      # install would run cortex-shell's prepare-sidecar, which (by design)
+      # demands a daemon binary this job doesn't build.
+      - run: pnpm install --frozen-lockfile --filter tpt-pwa
         working-directory: pwa
       - run: pnpm run check
         working-directory: pwa
