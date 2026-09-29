@@ -156,7 +156,9 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           go build -o "bin/cortex-daemon-${TRIPLE}" ./cmd/cortex-daemon
       - run: pnpm install --frozen-lockfile
+      # Cargo.toml lives in the src-tauri subpackage, not in cortex-shell/.
       - run: cargo check
+        working-directory: cortex-shell/src-tauri
 
   cortex-android:
     name: Cortex Companion (Android)

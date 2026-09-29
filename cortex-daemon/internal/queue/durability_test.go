@@ -129,17 +129,21 @@ func TestFinishedTasksArePrunedBeyondInspectionCap(t *testing.T) {
 
 func TestEnqueueRollsBackMemoryWhenSaveFails(t *testing.T) {
 	dir := t.TempDir()
-	// Put the queue file's parent behind a regular FILE: the save's mkdir
-	// then fails deterministically on every platform (chmod is ignored on
-	// Windows).
+	// Open the queue at a real path, then point it at a parent that is a
+	// regular FILE: the save then fails deterministically on every platform
+	// (chmod is ignored on Windows, and Open-ing a path under a file errors
+	// with ENOTDIR on Linux but not on Windows).
+	q, err := Open(filepath.Join(dir, "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	blocker := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	q, err := Open(filepath.Join(blocker, "queue.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	q.mu.Lock()
+	q.path = filepath.Join(blocker, "queue.json")
+	q.mu.Unlock()
 	if _, err := q.Enqueue("syncNotes", json.RawMessage(`{}`), time.Time{}); err == nil {
 		t.Fatal("enqueue should fail when persistence fails")
 	}
