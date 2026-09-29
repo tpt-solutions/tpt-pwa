@@ -137,12 +137,12 @@ func NewHandler(ctx context.Context, cfg Config, taskQueue *queue.Queue, broker 
 		// Browser PWAs connect from http(s)://localhost:<port> origins; the
 		// daemon is loopback-only, so any loopback origin is acceptable.
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			OriginPatterns: []string{"localhost:*", "127.0.0.1:*", "127.0.0.0/8:*"},
+			OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
 		})
 		if err != nil {
 			return
 		}
-		conn.SetReadLimit(maxFSWriteBytes + (1 << 20)) // payload cap + envelope headroom
+		conn.SetReadLimit(maxFSWriteBytes*4/3 + (1 << 20)) // base64 payload + envelope headroom
 		go func() { <-ctx.Done(); conn.Close(websocket.StatusGoingAway, "daemon shutting down") }()
 		broker.ServeConn(r.Context(), dispatch, conn)
 	})

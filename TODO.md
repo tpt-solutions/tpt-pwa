@@ -78,3 +78,84 @@ Bugs, security hardening, and DX/adoption gaps found in a full-platform review. 
 - [x] Scaffold CLI — `tools/create-tpt-companion` (`pnpm scaffold -- --name cortex-thing --lang go|rust|ts`): generates a companion package with copyright headers, manifest license fields, a contract-shaped starter and a passing test; verified that generated Go and Rust output compiles and tests green, and that TS companions auto-register in `pnpm-workspace.yaml`
 - [x] Multi-device sync demo — `examples/multi-device-sync` + `pwa/src/lib/crdt-multi-device.test.ts`: two devices diverge from a shared state and edit the same note's different fields offline, then converge with neither write lost. Building it exposed and fixed two real `crdt.ts` bugs: notes now live directly in the document root (a `_root.notes` container could win/lose wholesale on concurrent first-creation) and `upsertNote` reuses a note's field map so merges are field-level instead of whole-note
 - [x] Status/telemetry panel — a collapsible panel in the PWA (`App.svelte`) showing daemon identity/version (`cortex.ping`), the daemon's task queue shape (`cortex.task.list`, summarized by `telemetry.ts`), local outbox depth, the last flush outcome, storage backend, and CRDT readiness; refreshed on open, on (re)connect, with unit tests
+
+## Platform Review 2 (2026-09-29)
+
+Findings from a second full review (PWA, daemon, engine, adoption). Found by reading code, not by running it: write a failing regression test or repro first, then fix. Detail lives in the approved plan. Tier 1 = bugs, Tier 2 = adoption, Tier 3 = features/ideas.
+
+### Tier 1 — CI/tooling bugs
+
+- [x] Fix CI PR path filters — `ci.yml` used `pull_request.changed_files` (an integer count), so PR jobs never ran; replaced with a `changes` job using `dorny/paths-filter`, and the PWA job now runs `pnpm run test` (edit applied, **unverified until a PR runs it**)
+- [ ] Verify the CI fix with a throwaway PR touching only `pwa/` (pwa job runs, others skip)
+- [ ] Make `cortex-shell/scripts/prepare-sidecar.mjs` fail loudly instead of writing a 0-byte sidecar; have CI run it
+- [ ] Sign the release APK and build the gomobile `.aar` in `release.yml` (today's APK is unsigned and ships without the daemon)
+- [ ] Check `cortex-android/app/proguard-rules.pro` keeps the reflectively loaded `Mobile` class (R8 is on)
+- [ ] Verify the root `dev:daemon` script (`go.mod` lives in `cortex-daemon/`)
+- [ ] Add `.gitattributes` (`* text=auto`; `gradlew` and `*.sh` as LF)
+- [ ] Scaffold CLI fixes: Go template test shadows `status()`, silent workspace-regex failure, TS template lacks vitest/typescript devDeps, add `--dry-run`/`--force`
+
+### Tier 1 — PWA bugs
+
+- [ ] Persist and load the CRDT — `app.ts:34` opens `NoteDoc` with no binary and never saves; save after each mutation, load on open, seed from `listNotes()` on first run
+- [ ] Flush debounced edits on `pagehide`/`visibilitychange`; clear the timer in `deleteNote`
+- [ ] Fix rollback: restore the right snapshot and undo the storage write when `createNote` rolls back the UI
+- [ ] Make sync hand-off idempotent — idempotency keys, independent dequeues (no `Promise.all`), monotonic outbox ordering instead of `Date.now()`
+- [ ] Add tombstones for deletes in `Note` and the CRDT (a delete currently loses to a concurrent edit or resurrects)
+- [ ] Make `#markSynced` one atomic storage op (`UPDATE ... WHERE updatedAt <= ?`)
+- [ ] Storage backend switching: persist the chosen backend, migrate on switch, elect a leader tab (Web Locks) so a second tab doesn't silently fall back to a different database
+- [ ] `CortexRPC`: reconnect with backoff, reject pending calls on close, memoize in-flight `connect()`, check `enqueueSyncTask` results
+- [ ] Service worker: exclude `/sw.js` from the fetch handler, hash file contents (not names/sizes), replace mid-session `skipWaiting()` with an update-available prompt
+- [ ] HTTP sync path: dead-letter permanent 4xx entries; replace the placeholder default endpoint `https://api.tpt/sync`
+- [ ] Smaller PWA fixes: unhandled rejections in `App.svelte`, `installPrompt` timing/clearing, `modulePromise` caching a null result, wasm handle leak in `crdt.merge`, device-clock LWW ordering
+- [ ] PWA test gaps: `app.ts` (debounce/rollback), `cortex-client.ts`, the three storage backends, `generate-sw.mjs`, CRDT persist/reload, multi-tab
+
+### Tier 1 — Daemon (Go) bugs
+
+- [ ] `scheduler.go`/`server.go`: `OnTransition` receives the requested state, so `failed` never broadcasts `taskCompleted`; report the resulting state
+- [ ] `cmd/cortex-daemon/main.go`: no signal handling; use `signal.NotifyContext` for SIGINT/SIGTERM
+- [ ] `engineexec.go`: deadlock when the engine stays alive after a decode error; kill it before `Wait`
+- [ ] Add a per-task timeout and an `http.Client` timeout (`engineexec.go`, `syncexec.go`) so one hung task can't stall the serial queue
+- [ ] `server.go`: raise the WebSocket read limit above the base64 size of a 4 MiB payload so the documented `-32602` actually fires
+- [ ] `fs.write`: resolve symlinks (`EvalSymlinks`) to close the sandbox escape; write via temp file plus rename
+- [ ] `rpc.Broadcast`: don't write while holding the lock; add keepalive pings
+- [ ] `queue.go`: fsync, prune finished tasks, move a corrupt file aside instead of refusing to start, roll back the in-memory append when the save fails
+- [ ] Graceful shutdown: `Run` should wait for `Shutdown` and the scheduler
+- [ ] Reject unknown task kinds at enqueue, classify permanent vs transient failures, add idempotency keys to retries, enforce exactly one of `entries`/`payload`
+- [ ] Remove the dead `127.0.0.0/8:*` origin pattern; require an auth token in `mobile.go`
+
+### Tier 1 — Engine (Rust) bugs
+
+- [ ] Depth limit and token cap in the parser/compiler/`Drop` (deep nesting overflows the stack, contradicting the "total" claim in `lib.rs`); add adversarial tests
+- [ ] Compiler jump targets cast `as u16` wrap silently; use `try_from` and return a compile error
+- [ ] Fix quadratic `LoadLocal` list cloning that the instruction budget doesn't count
+- [ ] Distinct exit codes (2 = permanent) so the daemon stops retrying parse/compile errors 8 times
+- [ ] Short-circuit `&&`/`||`; fix NaN and Int/Float comparison inconsistencies and the wrong error variant for data errors
+
+### Tier 2 — Adoption
+
+- [ ] Release binaries for daemon and engine (win/mac/linux, x64+arm64) with SHA256 checksums, `--generate-notes`, and a tests-first gate
+- [ ] One-line installers (`install.ps1`/`install.sh`), then winget/scoop/Homebrew manifests
+- [ ] `cortex doctor` subcommand (port, token, origin, engine binary/version, queue health), linked from the PWA cortex chip
+- [ ] Devcontainer plus `mise.toml`/`.tool-versions` (Node 22, pnpm 11, Go 1.25, Rust 1.85); Dockerfile for the daemon
+- [ ] Make `examples/local-sync` and `examples/multi-device-sync` runnable with one command; remove hardcoded `.exe` paths
+- [ ] `create-tpt-pwa` starter (notes/todo/chat templates with the daemon-degradation layer and CI prewired); register scaffolded Go/Rust companions in CI
+- [ ] `.ctx` recipe cookbook in `examples/recipes/` (retry-upload, periodic fetch, batch sync), each with a test
+- [ ] `SECURITY.md` (loopback binding, origin rules, token handling, `fs` sandbox, engine budget, reporting process)
+- [ ] Architecture diagram (Mermaid) in the README
+- [ ] `.ctx` language reference
+- [ ] Troubleshooting/FAQ (port 9911, Android cleartext-loopback WebView, Windows firewall)
+- [ ] CHANGELOG, `CODE_OF_CONDUCT.md`, issue/PR templates, `CODEOWNERS`; expand `cortex-shell/README.md`, `CONTRIBUTING.md`, `docs/jsonrpc-contract.md`
+- [ ] CI: Windows/macOS matrix, Go and Gradle caches, Dependabot, CodeQL, `govulncheck`, `cargo audit`, `pnpm audit`, version-sync check across all manifests, coverage, provenance attestations
+
+### Tier 3 — Features and ideas (menu, unprioritized)
+
+- [ ] Product gaps: search, export/import (JSON/Markdown), `navigator.storage.persist()`, encryption at rest and in sync, multi-tab coordination, register Background Sync (`tpt-sync` is never registered, so the SW handler is dead code), a11y (live regions, aria-labels, reduced motion), i18n
+- [ ] Daemon: task cancel/retry/prune API, `/health` and `/metrics`, structured logging, config file, TLS
+- [ ] Engine language: `null` literal, assignment, `* / %`, unary minus, lists/maps, functions, `while`; a real `db.query` (today it ignores the SQL) and `db.exec` (a no-op)
+- [ ] `.ctx` playground in the PWA (Rust VM compiled to WASM, same bytecode as the daemon)
+- [ ] Capability-manifest recipes: scripts declare the natives they use (net/fs/db) and the daemon asks for consent
+- [ ] Deterministic replay: record host-call traces from the stdio JSON protocol for fixtures and bug reports
+- [ ] QR pairing from the Android/shell app, replacing the query-string token with a short-lived exchange
+- [ ] CRDT-synced script/recipe store across devices
+- [ ] Daemon-to-daemon LAN sync (mDNS plus WebSocket) with a conflict-inspector UI over CRDT history
+- [ ] Event triggers in `.ctx` (file-watch, cron, connectivity change) instead of 5s polling

@@ -6,15 +6,50 @@ on:
   pull_request:
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pwa: ${{ steps.filter.outputs.pwa }}
+      daemon: ${{ steps.filter.outputs.daemon }}
+      engine: ${{ steps.filter.outputs.engine }}
+      shell: ${{ steps.filter.outputs.shell }}
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            pwa:
+              - 'pwa/**'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
+            daemon:
+              - 'cortex-daemon/**'
+              - '.github/workflows/ci.yml'
+            engine:
+              - 'cortex-engine/**'
+              - 'cortex-daemon/internal/engineexec/**'
+              - '.github/workflows/ci.yml'
+            shell:
+              - 'cortex-shell/**'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
+            android:
+              - 'cortex-android/**'
+              - '.github/workflows/ci.yml'
+
   pwa:
     name: PWA (Svelte/TS)
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files, 'pwa/') ||
-      contains(github.event.pull_request.changed_files, 'pnpm-workspace.yaml') ||
-      contains(github.event.pull_request.changed_files, 'package.json') ||
-      contains(github.event.pull_request.changed_files, 'tsconfig.json')
+    needs: changes
+    if: needs.changes.outputs.pwa == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,6 +61,8 @@ jobs:
         working-directory: pwa
       - run: pnpm run check
         working-directory: pwa
+      - run: pnpm run test
+        working-directory: pwa
       - run: pnpm run build
         working-directory: pwa
 
@@ -35,11 +72,8 @@ jobs:
     defaults:
       run:
         working-directory: cortex-daemon
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files, 'cortex-daemon/') ||
-      contains(github.event.pull_request.changed_files, 'go.mod') ||
-      contains(github.event.pull_request.changed_files, 'go.sum')
+    needs: changes
+    if: needs.changes.outputs.daemon == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -55,11 +89,8 @@ jobs:
     defaults:
       run:
         working-directory: cortex-engine
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files, 'cortex-engine/') ||
-      contains(github.event.pull_request.changed_files, 'Cargo.toml') ||
-      contains(github.event.pull_request.changed_files, 'Cargo.lock')
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,9 +109,8 @@ jobs:
     defaults:
       run:
         working-directory: cortex-shell
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files, 'cortex-shell/')
+    needs: changes
+    if: needs.changes.outputs.shell == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -102,9 +132,8 @@ jobs:
     defaults:
       run:
         working-directory: cortex-android
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files, 'cortex-android/')
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

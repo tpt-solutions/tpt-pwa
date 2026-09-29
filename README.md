@@ -17,7 +17,16 @@ tpt-pwa/
 └── TODO.md              # Phased task checklist
 ```
 
-Progress is tracked in [TODO.md](TODO.md). Contributing? Start with [CONTRIBUTING.md](CONTRIBUTING.md) (dual-license terms) and the shared [JSON-RPC contract](docs/jsonrpc-contract.md). Formal-verification scope for the engine lives in [docs/formal-verification.md](docs/formal-verification.md).
+## Who is this for / how to use it
+
+tpt-pwa is a **framework you fork or scaffold from**, not a packaged end-user app. There are no published packages or releases yet.
+
+- **Try it:** follow the Quickstart below. The PWA runs standalone; the daemon is optional.
+- **Build your own app:** fork the repo and adapt `pwa/`. It works offline with Service Workers + IndexedDB alone, and gains background processing and hardware access when a companion is connected.
+- **Add a native companion:** `node tools/create-tpt-companion --name cortex-foo --lang go|rust|ts` ([docs](tools/create-tpt-companion/README.md)). Companions speak the [JSON-RPC contract](docs/jsonrpc-contract.md).
+- **Learn by example:** [examples/local-sync](examples/local-sync/README.md) and [examples/multi-device-sync](examples/multi-device-sync/README.md).
+
+Progress is tracked in [TODO.md](TODO.md). This project accepts **issues only, not pull requests** — see [CONTRIBUTING.md](CONTRIBUTING.md). The shared [JSON-RPC contract](docs/jsonrpc-contract.md) is the reference for the wire protocol. Formal-verification scope for the engine lives in [docs/formal-verification.md](docs/formal-verification.md).
 
 ## Quickstart
 

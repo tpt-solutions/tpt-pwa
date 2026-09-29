@@ -12,7 +12,9 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/server"
@@ -31,8 +33,8 @@ func main() {
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if err := server.Run(ctx, server.Config{
 		Addr:         *addr,
 		SyncEndpoint: *syncEndpoint,

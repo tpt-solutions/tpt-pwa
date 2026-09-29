@@ -29,6 +29,9 @@ type Scheduler struct {
 	Connected   Connectivity
 	PollEvery   time.Duration
 	MaxAttempts int
+	// TaskTimeout bounds one Execute call so a hung executor cannot stall the
+	// serial queue (default 2m).
+	TaskTimeout time.Duration
 	// OnTransition, when set, is notified after every state change (used to
 	// push cortex.event.taskCompleted notifications to connected PWAs).
 	OnTransition func(taskID string, state queue.State)
@@ -41,6 +44,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 	if s.MaxAttempts <= 0 {
 		s.MaxAttempts = 8
+	}
+	if s.TaskTimeout <= 0 {
+		s.TaskTimeout = 2 * time.Minute
 	}
 	ticker := time.NewTicker(s.PollEvery)
 	defer ticker.Stop()
@@ -78,8 +84,13 @@ func (s *Scheduler) tick(ctx context.Context) {
 }
 
 func (s *Scheduler) transition(taskID string, state queue.State, errMsg string, maxAttempts int) {
-	if _, err := s.Queue.Transition(taskID, state, errMsg, maxAttempts, time.Now()); err != nil {
+	// A requeue past max attempts is parked as failed by the queue, so report
+	// the state the task actually landed in, not the one requested.
+	task, err := s.Queue.Transition(taskID, state, errMsg, maxAttempts, time.Now())
+	if err != nil {
 		log.Printf("scheduler: transition task %s to %s: %v", taskID, state, err)
+	} else {
+		state = task.State
 	}
 	if s.OnTransition != nil {
 		s.OnTransition(taskID, state)
