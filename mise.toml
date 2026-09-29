@@ -1,0 +1,7 @@
+# Per-toolchain pins for contributors using mise (https://mise.jdx.dev).
+# The same versions are what CI installs; `mise install` sets you up.
+[tools]
+node = "22"
+pnpm = "11"
+go = "1.25"
+rust = "1.85"

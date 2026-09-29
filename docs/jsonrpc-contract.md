@@ -49,10 +49,14 @@ The PWA calls this implicitly via `checkCortexConnection()`; a successful handsh
   }
 }
 // result
-{ "taskId": "53c281e98e29be47", "state": "queued" }
+{ "taskId": "53c281e98e29be47", "state": "queued", "accepted": 1, "deduplicated": false }
 ```
 
-Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <RFC 3339>` to defer. Params require exactly one of `entries`/`payload`; `kind` is mandatory.
+Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <RFC 3339>` to defer. Params require exactly one of `entries`/`payload`; `kind` is mandatory and must be one of `syncNotes` or `crdtMerge` (anything else is `-32602`).
+
+`"batchId": "<string>"` is an optional idempotency key: re-submitting a batch whose queued/running task already carries that key returns the SAME task with `"deduplicated": true` instead of queueing it twice. The PWA derives the key from the batch contents, so a flush retried after a lost response dedupes.
+
+`"accepted"` counts the entries in the submission so clients can verify the daemon acknowledged the whole batch (a mismatched count is treated as a failed hand-off and the client degrades to the fallback path).
 
 ### `cortex.task.status`
 
@@ -78,7 +82,9 @@ Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <
 // result: { "path": "<absolute path>", "bytesWritten": 42 }
 ```
 
-Paths are resolved inside the daemon's data directory; traversal attempts return `-32602`. Decoded payloads larger than 4 MiB are rejected with `-32602`.
+Paths are resolved inside the daemon's data directory — **after** symlink resolution, so a symlink (or Windows junction) inside the sandbox pointing elsewhere cannot become an escape hatch; traversal attempts return `-32602`. Decoded payloads larger than 4 MiB are rejected with `-32602`. Writes land atomically via temp file + rename: a crash mid-write leaves the previous contents intact.
+
+The sync endpoint's push envelope carries the outbox entry's id (see §"End-to-end", step 2) so server-side deduplication can recognise retried pushes of the same entry.
 
 > Not part of this contract: the *internal* line-delimited JSON protocol between the daemon and the cortex-engine VM (`exec-host`), documented in `cortex-engine/src/host.rs`.
 
@@ -97,6 +103,6 @@ Broadcast when a task reaches `completed` or `failed`. Subscribe with `cortexRPC
 
 1. User creates a note offline → PWA writes it to SQLite/IndexedDB and the durable outbox (optimistic UI never waits).
 2. `SyncManager.flush()` checks the negotiated path:
-   - **Path A** — daemon connected: `cortex.task.enqueue {kind:"syncNotes", entries}` → success empties the outbox; the daemon's scheduler pushes to the sync endpoint whenever the OS reports connectivity, even with no tab open.
-   - **Path B** — no daemon: direct HTTP push per entry while online; failures stay queued for the next `online` event / app focus / Background Sync tick.
+   - **Path A** — daemon connected: `cortex.task.enqueue {kind:"syncNotes", batchId, entries}` → success empties the outbox; the daemon's scheduler pushes to the sync endpoint whenever the OS reports connectivity, even with no tab open. Each push envelope is `{ "id": "<outbox entry id>", "action": "…", "note": {…} }`.
+   - **Path B** — no daemon: direct HTTP push per entry while online; failures stay queued for the next `online` event / app focus / Background Sync tick. Permanent 4xx responses (any 4xx except 408/429) dead-letter the entry instead of retrying forever. When no endpoint is configured, Path B is disabled and entries wait for the daemon.
 3. Daemon notifies `cortex.event.taskCompleted` so a connected PWA can refresh.

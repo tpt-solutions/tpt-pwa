@@ -1,0 +1,22 @@
+# Normalize line endings across platforms (Windows checkouts included).
+* text=auto
+
+# Scripts must stay LF so they execute under sh/CI on every OS.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows batch files want CRLF.
+*.bat text eol=crlf
+
+# These are binary no matter what.
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.wasm binary
+*.jar binary
+*.aar binary
+*.keystore binary
+*.jks binary

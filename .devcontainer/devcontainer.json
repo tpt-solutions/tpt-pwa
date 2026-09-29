@@ -1,0 +1,26 @@
+{
+  "name": "tpt-pwa",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/go:1": { "version": "1.25" },
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers-community/features/deno:1": {}
+  },
+  "postCreateCommand": "corepack enable pnpm && pnpm install && pnpm run hooks:setup",
+  "forwardPorts": [9911, 5173],
+  "portsAttributes": {
+    "9911": { "label": "cortex-daemon (loopback RPC)" },
+    "5173": { "label": "vite dev server" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "svelte.svelte-vscode",
+        "golang.go",
+        "rust-lang.rust-analyzer",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  }
+}

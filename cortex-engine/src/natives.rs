@@ -5,6 +5,8 @@
 //! cortex-daemon implements with real OS access. Test doubles live here too,
 //! so scripts can be executed deterministically in tests.
 
+use std::rc::Rc;
+
 use crate::bytecode::NativeId;
 use crate::value::Value;
 
@@ -71,10 +73,10 @@ impl NativeEnv for MemoryNative {
 
 /// Map helper used by hosts to build row values.
 pub fn row(pairs: &[(&str, Value)]) -> Value {
-    Value::Map(
+    Value::Map(Rc::new(
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
-    )
+    ))
 }

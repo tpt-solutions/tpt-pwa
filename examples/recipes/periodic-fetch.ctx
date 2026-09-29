@@ -1,0 +1,19 @@
+// Recipe: periodic-fetch
+// Refresh a cached resource when connectivity allows. Schedule it by
+// enqueuing with a future runAt (cortex.task.enqueue runAt) — the daemon's
+// poll calls the task only when it is due; the connectivity guard keeps it
+// a harmless no-op while offline so re-queueing is always safe. Cache
+// freshness is decided in SQL, not in the script: the DSL has no clock on
+// purpose (device clocks lie; the daemon's clock is the only one).
+//
+// Test: examples/recipes/recipes_test.rs
+task periodicFetch() -> void {
+    if !native.net.isConnected() {
+        return;
+    }
+    let stale = native.db.query("SELECT url FROM cache WHERE fetchedAt < ? ORDER BY fetchedAt", "now");
+    for entry in stale {
+        native.http.post(entry.url, entry);
+        native.db.exec("UPDATE cache SET fetchedAt = ? WHERE url = ?", "now", entry.url);
+    }
+}

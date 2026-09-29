@@ -38,35 +38,41 @@ type SyncExecutor struct {
 	Client   *http.Client
 }
 
+// defaultHTTPTimeout bounds every push attempt so one stalled endpoint
+// request cannot occupy a scheduler slot until its task timeout.
+const defaultHTTPTimeout = 30 * time.Second
+
 // Execute implements scheduler.Executor.
 func (e *SyncExecutor) Execute(ctx context.Context, task queue.Task) error {
 	if task.Kind != "syncNotes" {
-		return fmt.Errorf("unsupported task kind %q", task.Kind)
+		return &queue.PermanentError{Err: fmt.Errorf("unsupported task kind %q", task.Kind)}
 	}
 	var parsed syncTaskBody
 	if len(task.Body) == 0 {
-		return fmt.Errorf("task carries no body")
+		return &queue.PermanentError{Err: fmt.Errorf("task carries no body")}
 	}
 	if err := json.Unmarshal(task.Body, &parsed); err != nil {
-		return fmt.Errorf("parse task body: %w", err)
+		return &queue.PermanentError{Err: fmt.Errorf("parse task body: %w", err)}
 	}
 	if len(parsed.Entries) == 0 {
-		return fmt.Errorf("task carries no entries")
+		return &queue.PermanentError{Err: fmt.Errorf("task carries no entries")}
 	}
 	client := e.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	var lastErr error
 	pushed := 0
 	for _, entry := range parsed.Entries {
-		payload, err := json.Marshal(map[string]any{"action": entry.Action, "note": entry.Payload})
+		// The entry id rides along (docs/jsonrpc-contract.md) so the server
+		// side can deduplicate retried pushes of the same outbox entry.
+		payload, err := json.Marshal(map[string]any{"id": entry.ID, "action": entry.Action, "note": entry.Payload})
 		if err != nil {
 			return fmt.Errorf("encode entry %s: %w", entry.ID, err)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.Endpoint, bytes.NewReader(payload))
 		if err != nil {
-			return fmt.Errorf("build request: %w", err)
+			return &queue.PermanentError{Err: fmt.Errorf("build request: %w", err)}
 		}
 		req.Header.Set("content-type", "application/json")
 		resp, err := client.Do(req)
@@ -76,6 +82,11 @@ func (e *SyncExecutor) Execute(ctx context.Context, task queue.Task) error {
 		}
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			resp.Body.Close()
+			if permanentHTTP(resp.StatusCode) {
+				// 4xx (except 408/429) means this entry can never succeed;
+				// retrying would just burn attempts.
+				return &queue.PermanentError{Err: fmt.Errorf("sync endpoint rejected entry %s with HTTP %d", entry.ID, resp.StatusCode)}
+			}
 			lastErr = fmt.Errorf("sync endpoint returned HTTP %d", resp.StatusCode)
 			break
 		}
@@ -86,6 +97,12 @@ func (e *SyncExecutor) Execute(ctx context.Context, task queue.Task) error {
 		return fmt.Errorf("pushed %d/%d entries: %w", pushed, len(parsed.Entries), lastErr)
 	}
 	return nil
+}
+
+// permanentHTTP reports whether a status means "this entry will never be
+// accepted" (client error, excluding request-timeout and rate-limit).
+func permanentHTTP(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
 // HTTPConnectivity probes the sync endpoint with a short HEAD request; any

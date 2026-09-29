@@ -8,7 +8,12 @@ import type { SyncTransport } from './sync'
 
 function makeNote(overrides: Partial<Note> = {}): Note {
   const now = Date.now()
-  return { id: 'note-1', title: 'Groceries', body: 'oat milk', createdAt: now, updatedAt: now, syncedAt: null, ...overrides }
+  return { id: 'note-1', title: 'Groceries', body: 'oat milk', createdAt: now, updatedAt: now, syncedAt: null, deletedAt: null, ...overrides }
+}
+
+/** A fetch double returning a fixed Response (or throwing when `error` is set). */
+function fetchReturning(status: number, body = ''): typeof fetch {
+  return (async () => new Response(body, { status })) as typeof fetch
 }
 
 class RecordingTransport implements SyncTransport {
@@ -65,7 +70,7 @@ describe('SyncManager (spec §4 background sync)', () => {
     const storage = new MemoryStorage()
     await storage.init()
     const offlineFetch: typeof fetch = () => Promise.reject(new TypeError('fetch failed (offline)'))
-    const sync = new SyncManager({ storage, fetchFn: offlineFetch })
+    const sync = new SyncManager({ storage, fetchFn: offlineFetch, endpoint: 'http://127.0.0.1:9/sync' })
 
     await sync.queueNote(makeNote(), 'create')
     const outcome = await sync.flush()
@@ -76,6 +81,69 @@ describe('SyncManager (spec §4 background sync)', () => {
     expect(await storage.pendingQueue()).toHaveLength(1)
   })
 
+  it('with no endpoint configured the HTTP path is disabled and entries stay queued', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const sync = new SyncManager({ storage })
+
+    await sync.queueNote(makeNote(), 'create')
+    const outcome = await sync.flush()
+
+    expect(outcome.via).toBe('none')
+    expect(outcome.pending).toBe(1)
+    expect(await storage.pendingQueue()).toHaveLength(1)
+  })
+
+  it('permanent 4xx responses dead-letter an entry instead of retrying forever', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const sync = new SyncManager({ storage, fetchFn: fetchReturning(422), endpoint: 'http://127.0.0.1:9/sync' })
+
+    await sync.queueNote(makeNote(), 'create')
+    const outcome = await sync.flush()
+
+    expect(outcome.via).toBe('http')
+    expect(outcome.failed).toBe(1)
+    expect(await storage.pendingQueue()).toEqual([])
+    const letters = await storage.deadLetters()
+    expect(letters).toHaveLength(1)
+    expect(letters[0].entry.id).toBe('note-1:create')
+    expect(letters[0].reason).toContain('422')
+  })
+
+  it('408/429 are transient: the entry stays queued for another attempt', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const sync = new SyncManager({ storage, fetchFn: fetchReturning(429), endpoint: 'http://127.0.0.1:9/sync' })
+
+    await sync.queueNote(makeNote(), 'create')
+    const outcome = await sync.flush()
+
+    expect(outcome.failed).toBe(1)
+    expect(await storage.pendingQueue()).toHaveLength(1)
+    expect(await storage.deadLetters()).toEqual([])
+  })
+
+  it('outbox ordering is monotonic even when the wall clock stalls', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const sync = new SyncManager({ storage })
+
+    const realNow = Date.now
+    Date.now = () => 1000 // clock frozen: three entries in the same millisecond
+    try {
+      await sync.queueNote(makeNote({ id: 'a' }), 'create')
+      await sync.queueNote(makeNote({ id: 'b' }), 'create')
+      await sync.queueNote(makeNote({ id: 'c' }), 'create')
+    } finally {
+      Date.now = realNow
+    }
+
+    const queued = await storage.pendingQueue()
+    expect(queued.map((entry) => entry.payload as { id: string }).map((payload) => payload.id)).toEqual(['a', 'b', 'c'])
+    expect(new Set(queued.map((entry) => entry.queuedAt)).size).toBe(3)
+  })
+
   it('fallback path: pushes directly over HTTP when online and marks notes synced', async () => {
     const storage = new MemoryStorage()
     await storage.init()
@@ -84,7 +152,7 @@ describe('SyncManager (spec §4 background sync)', () => {
       seen.push(String(input))
       return new Response(null, { status: 200 })
     }) as typeof fetch
-    const sync = new SyncManager({ storage, fetchFn: onlineFetch })
+    const sync = new SyncManager({ storage, fetchFn: onlineFetch, endpoint: 'http://127.0.0.1:9/sync' })
 
     // Real flow: the note is persisted first, then queued.
     const note = makeNote()
@@ -103,7 +171,7 @@ describe('SyncManager (spec §4 background sync)', () => {
     const storage = new MemoryStorage()
     await storage.init()
     const onlineFetch = (async () => new Response(null, { status: 200 })) as typeof fetch
-    const sync = new SyncManager({ storage, fetchFn: onlineFetch })
+    const sync = new SyncManager({ storage, fetchFn: onlineFetch, endpoint: 'http://127.0.0.1:9/sync' })
 
     // Queue revision 1, then the user edits the note to revision 2 before
     // the flush fires. The outbox entry still carries the v1 payload.
@@ -151,7 +219,7 @@ describe('SyncManager (spec §4 background sync)', () => {
       enqueueSyncTask: () => Promise.reject(new Error('websocket closed')),
     }
     const onlineFetch = (async () => new Response(null, { status: 200 })) as typeof fetch
-    const sync = new SyncManager({ storage, transport, fetchFn: onlineFetch })
+    const sync = new SyncManager({ storage, transport, fetchFn: onlineFetch, endpoint: 'http://127.0.0.1:9/sync' })
 
     await sync.queueNote(makeNote(), 'create')
     const outcome = await sync.flush()

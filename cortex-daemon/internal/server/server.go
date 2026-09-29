@@ -28,12 +28,20 @@ import (
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/syncexec"
 )
 
+// Version is the daemon's reported identity (cortex.ping).
 const Version = "0.1.0"
 
 // maxFSWriteBytes caps decoded fs.write payloads. The WebSocket read limit
 // already bounds messages at 4 MiB; this rejects decoded sizes explicitly so
 // the sandbox cannot be pushed into huge synchronous writes.
 const maxFSWriteBytes = 4 << 20
+
+// taskKinds enumerates every kind the daemon accepts at enqueue. Anything
+// else is rejected with -32602 up front instead of failing after retries.
+var taskKinds = map[string]bool{
+	"syncNotes": true, // PWA outbox batches (docs/jsonrpc-contract.md)
+	"crdtMerge": true, // CRDT mirror exchange (spec §5, scaffold)
+}
 
 // Config carries every knob the daemon exposes.
 type Config struct {
@@ -84,7 +92,11 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 		},
 	}
-	go sched.Run(ctx)
+	schedDone := make(chan struct{})
+	go func() {
+		defer close(schedDone)
+		sched.Run(ctx)
+	}()
 
 	// NewHandler builds the HTTP surface (exported for tests and embedders).
 	mux := http.NewServeMux()
@@ -98,8 +110,13 @@ func Run(ctx context.Context, cfg Config) error {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 	log.Printf("listening on ws://%s/rpc", cfg.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+	serveErr := server.ListenAndServe()
+	// Graceful shutdown: the HTTP server has drained (or hit its 5s grace)
+	// and the scheduler has stopped touching the queue before we return --
+	// embedders (gomobile) rely on Run being fully done after cancellation.
+	<-schedDone
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		return serveErr
 	}
 	return nil
 }
@@ -191,20 +208,30 @@ func pingHandler() rpc.Handler {
 	}
 }
 
+type enqueueParams struct {
+	Kind    string            `json:"kind"`
+	BatchID string            `json:"batchId,omitempty"` // idempotency key for retried hand-offs
+	Payload json.RawMessage   `json:"payload,omitempty"`
+	Entries []json.RawMessage `json:"entries,omitempty"`
+	RunAt   *time.Time        `json:"runAt,omitempty"`
+}
+
 func taskEnqueueHandler(taskQueue *queue.Queue) rpc.Handler {
-	type params struct {
-		Kind    string            `json:"kind"`
-		Payload json.RawMessage   `json:"payload,omitempty"`
-		Entries []json.RawMessage `json:"entries,omitempty"`
-		RunAt   *time.Time        `json:"runAt,omitempty"`
-	}
 	return func(_ context.Context, raw json.RawMessage) (any, error) {
-		var p params
+		var p enqueueParams
 		if err := rpc.ParseParams(raw, &p); err != nil {
 			return nil, err
 		}
 		if p.Kind == "" {
 			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "kind is required"}
+		}
+		if !taskKinds[p.Kind] {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "unsupported task kind: " + p.Kind}
+		}
+		// Exactly one of entries/payload: a batch that is both is ambiguous,
+		// one that is neither can never execute.
+		if (p.Entries != nil) == (p.Payload != nil) {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "exactly one of entries or payload is required"}
 		}
 		body := p.Payload
 		if p.Entries != nil {
@@ -219,12 +246,21 @@ func taskEnqueueHandler(taskQueue *queue.Queue) rpc.Handler {
 		if p.RunAt != nil {
 			runAt = *p.RunAt
 		}
-		task, err := taskQueue.Enqueue(p.Kind, body, runAt)
+		task, deduplicated, err := taskQueue.EnqueueIdempotent(p.Kind, p.BatchID, body, runAt)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"taskId": task.ID, "state": string(task.State)}, nil
+		return map[string]any{"taskId": task.ID, "state": string(task.State), "accepted": p.countEntries(), "deduplicated": deduplicated}, nil
 	}
+}
+
+// countEntries reports how many entries the submission carried so the PWA
+// transport can verify the daemon acknowledged the whole batch.
+func (p *enqueueParams) countEntries() int {
+	if p.Entries == nil {
+		return 1
+	}
+	return len(p.Entries)
 }
 
 func taskStatusHandler(taskQueue *queue.Queue) rpc.Handler {
@@ -268,17 +304,37 @@ func fsWriteHandler(dataDir string) rpc.Handler {
 		if p.Path == "" {
 			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "path is required"}
 		}
-		// Sandbox: everything lands under dataDir, no traversal out of it.
-		target := filepath.Join(dataDir, filepath.FromSlash(p.Path))
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			return nil, err
+		}
+		// Sandbox: everything lands under the REAL dataDir. A symlink tree
+		// inside dataDir pointing at /etc (or a junction on Windows) must not
+		// become an escape hatch, so both root and destination are resolved
+		// to their physical paths before the containment check.
 		root, err := filepath.Abs(dataDir)
 		if err != nil {
 			return nil, err
 		}
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, err
+		}
+		target := filepath.Join(root, filepath.FromSlash(p.Path))
 		abs, err := filepath.Abs(target)
 		if err != nil {
 			return nil, err
 		}
-		if !within(root, abs) {
+		// The destination itself may not exist yet (or may be a symlink);
+		// resolve its parent directory to the physical filesystem.
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return nil, err
+		}
+		realParent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+		if err != nil {
+			return nil, err
+		}
+		destination := filepath.Join(realParent, filepath.Base(abs))
+		if !within(realRoot, destination) {
 			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "path escapes the daemon sandbox"}
 		}
 		data, err := base64.StdEncoding.DecodeString(p.Buffer)
@@ -288,14 +344,31 @@ func fsWriteHandler(dataDir string) rpc.Handler {
 		if len(data) > maxFSWriteBytes {
 			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: fmt.Sprintf("buffer exceeds the %d byte limit", maxFSWriteBytes)}
 		}
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		if err := writeFileAtomic(destination, data); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(abs, data, 0o644); err != nil {
-			return nil, err
-		}
-		return map[string]any{"path": abs, "bytesWritten": len(data)}, nil
+		return map[string]any{"path": destination, "bytesWritten": len(data)}, nil
 	}
+}
+
+// writeFileAtomic writes via a temp file in the destination's directory plus
+// a rename, so a crash mid-write can never leave a truncated file under the
+// canonical name (readers see the old contents or the new ones, not half).
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func taskToJSON(task queue.Task) map[string]any {

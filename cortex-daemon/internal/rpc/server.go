@@ -17,7 +17,11 @@ import (
 	"github.com/coder/websocket"
 )
 
-const writeTimeout = 5 * time.Second
+const (
+	writeTimeout = 5 * time.Second
+	pingEvery    = 30 * time.Second
+	pingTimeout  = 10 * time.Second
+)
 
 // JSON-RPC 2.0 error codes used by the daemon.
 const (
@@ -38,25 +42,85 @@ type Handlers map[string]Handler
 // broadcasts daemon-initiated notifications.
 type Broker struct {
 	mu    sync.Mutex
-	conns map[*websocket.Conn]struct{}
+	conns map[*websocket.Conn]*connState
 }
 
-// NewBroker creates an empty broker.
+// connState serializes writes to one connection: websocket writes must not
+// interleave (data frames, error frames, pings), and no writer may ever hold
+// the broker-wide lock while writing -- one slow client must not stall the
+// others or the read loops.
+type connState struct {
+	writeMu sync.Mutex
+}
+
+// NewBroker creates an empty broker and starts its keepalive loop.
 func NewBroker() *Broker {
-	return &Broker{conns: map[*websocket.Conn]struct{}{}}
+	b := &Broker{conns: map[*websocket.Conn]*connState{}}
+	go b.keepalive()
+	return b
+}
+
+// keepalive pings every connected client. A client that stops answering is
+// closed so its slot (and the PWA's reconnect logic) recovers promptly
+// instead of lurking half-open for hours.
+func (b *Broker) keepalive() {
+	ticker := time.NewTicker(pingEvery)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.mu.Lock()
+		snapshot := make([]*websocket.Conn, 0, len(b.conns))
+		for conn := range b.conns {
+			snapshot = append(snapshot, conn)
+		}
+		b.mu.Unlock()
+		for _, conn := range snapshot {
+			state, ok := b.stateFor(conn)
+			if !ok {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+			state.writeMu.Lock()
+			err := conn.Ping(ctx)
+			state.writeMu.Unlock()
+			cancel()
+			if err != nil {
+				log.Printf("rpc: keepalive ping to %p failed: %v", conn, err)
+				conn.Close(websocket.StatusGoingAway, "keepalive timeout")
+			}
+		}
+	}
+}
+
+func (b *Broker) stateFor(conn *websocket.Conn) (*connState, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, ok := b.conns[conn]
+	return state, ok
 }
 
 // Broadcast sends a notification to every connected client (best effort).
+// Writes happen outside the broker lock through each connection's own write
+// mutex, so a stalled client delays only its own delivery.
 func (b *Broker) Broadcast(method string, params any) {
 	message, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
 	if err != nil {
 		return
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	conns := make([]*websocket.Conn, 0, len(b.conns))
 	for conn := range b.conns {
+		conns = append(conns, conn)
+	}
+	b.mu.Unlock()
+	for _, conn := range conns {
+		state, ok := b.stateFor(conn)
+		if !ok {
+			continue // gone between snapshot and write
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		state.writeMu.Lock()
 		err := conn.Write(ctx, websocket.MessageText, message)
+		state.writeMu.Unlock()
 		cancel()
 		if err != nil {
 			log.Printf("rpc: broadcast to %p failed: %v", conn, err)
@@ -68,8 +132,9 @@ func (b *Broker) Broadcast(method string, params any) {
 // Requests are dispatched serially per connection (the daemon's methods are
 // fast; heavy work belongs in the queue).
 func (b *Broker) ServeConn(ctx context.Context, handler func(ctx context.Context, request Request) (any, *RPCError), conn *websocket.Conn) {
+	state := &connState{}
 	b.mu.Lock()
-	b.conns[conn] = struct{}{}
+	b.conns[conn] = state
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
@@ -105,15 +170,26 @@ func (b *Broker) ServeConn(ctx context.Context, handler func(ctx context.Context
 	}
 }
 
+// write marshals and sends one frame under the connection's write mutex.
+func (b *Broker) write(ctx context.Context, conn *websocket.Conn, payload []byte) error {
+	state, ok := b.stateFor(conn)
+	if !ok {
+		state = &connState{} // connection already left the broker; still serialize locally
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	state.writeMu.Lock()
+	defer state.writeMu.Unlock()
+	return conn.Write(writeCtx, websocket.MessageText, payload)
+}
+
 func (b *Broker) writeResult(ctx context.Context, conn *websocket.Conn, id RequestID, result any) {
 	response, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	if err != nil {
 		log.Printf("rpc: encode response: %v", err)
 		return
 	}
-	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
-	defer cancel()
-	if err := conn.Write(writeCtx, websocket.MessageText, response); err != nil {
+	if err := b.write(ctx, conn, response); err != nil {
 		log.Printf("rpc: write response: %v", err)
 	}
 }
@@ -131,9 +207,7 @@ func (b *Broker) writeError(ctx context.Context, conn *websocket.Conn, id *Reque
 		log.Printf("rpc: encode error response: %v", err)
 		return
 	}
-	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
-	defer cancel()
-	if err := conn.Write(writeCtx, websocket.MessageText, response); err != nil {
+	if err := b.write(ctx, conn, response); err != nil {
 		log.Printf("rpc: write error response: %v", err)
 	}
 }

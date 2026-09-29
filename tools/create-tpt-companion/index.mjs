@@ -22,6 +22,8 @@ function parseArgs(argv) {
     else if (flag === '--lang') args.lang = argv[++i]
     else if (flag === '--description') args.description = argv[++i]
     else if (flag === '--dir') args.dir = resolve(argv[++i])
+    else if (flag === '--dry-run') args.dryRun = true
+    else if (flag === '--force') args.force = true
     else if (flag === '--help' || flag === '-h') args.help = true
     else {
       console.error(`create-tpt-companion: unknown argument ${flag}`)
@@ -72,19 +74,19 @@ func main() {
 `
 }
 
-function goTest(name) {
+function goTest() {
   return `// ${LICENSE_LINE}
 package main
 
 import "testing"
 
 func TestStatusIsReady(t *testing.T) {
-	status := status()
-	if !status.Ready {
+	got := status()
+	if !got.Ready {
 		t.Fatal("fresh companion must report ready")
 	}
-	if status.Version != "0.1.0" {
-		t.Fatalf("unexpected version %q", status.Version)
+	if got.Version != "0.1.0" {
+		t.Fatalf("unexpected version %q", got.Version)
 	}
 }
 `
@@ -140,6 +142,10 @@ function packageJson(name, description) {
       scripts: {
         check: 'tsc --noEmit',
         test: 'vitest run',
+      },
+      devDependencies: {
+        typescript: '~6.0.2',
+        vitest: '^5.0.1',
       },
     },
     null,
@@ -210,7 +216,7 @@ function gitignore(lang) {
 function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.help) {
-    console.log(`usage: node tools/create-tpt-companion --name <kebab-name> --lang <go|rust|ts> [--description "..."] [--dir <target>]`)
+    console.log(`usage: node tools/create-tpt-companion --name <kebab-name> --lang <go|rust|ts> [--description "..."] [--dir <target>] [--dry-run] [--force]`)
     process.exit(0)
   }
   if (!args.name || !/^[a-z][a-z0-9-]*$/.test(args.name)) {
@@ -220,8 +226,8 @@ function main() {
     fail('--lang must be one of: go, rust, ts')
   }
   const target = join(args.dir, args.name)
-  if (existsSync(target)) {
-    fail(`${target} already exists; refusing to overwrite`)
+  if (existsSync(target) && !args.force) {
+    fail(`${target} already exists; refusing to overwrite (pass --force to write into it)`)
   }
 
   const description = args.description ?? ''
@@ -230,7 +236,7 @@ function main() {
   if (args.lang === 'go') {
     files.set('go.mod', goMod(args.name))
     files.set(`${args.name}.go`, goSource(args.name, description))
-    files.set(`${args.name}_test.go`, goTest(args.name))
+    files.set(`${args.name}_test.go`, goTest())
   } else if (args.lang === 'rust') {
     files.set('Cargo.toml', cargoToml(args.name, description))
     files.set('src/lib.rs', rustLib(args.name, description))
@@ -244,27 +250,42 @@ function main() {
   }
   files.set('README.md', readme(args.name, args.lang, description))
 
+  // Convenience: register TS companions with a pnpm workspace at the target
+  // root, when one exists and doesn't already list the package.
+  let workspaceUpdate
+  if (args.lang === 'ts') {
+    const workspacePath = join(args.dir, 'pnpm-workspace.yaml')
+    if (existsSync(workspacePath)) {
+      const workspace = readFileSync(workspacePath, 'utf8')
+      if (!workspace.includes(`${args.name}/`)) {
+        // Tolerate quoted, single-quoted, and bare YAML list items.
+        const updated = workspace.replace(
+          /^packages:[ \t]*\r?\n((?:[ \t]*-[ \t]*(?:"[^"]+"|'[^']+'|[^\r\n#]+?)[ \t]*(?:#.*)?\r?\n)*)/m,
+          (m, list) => `packages:\n${list.endsWith('\n') ? list : list + '\n'}  - "${args.name}/"\n`,
+        )
+        if (updated === workspace) {
+          fail(`could not parse the packages list in ${workspacePath}; add "  - ${args.name}/" under "packages:" by hand`)
+        }
+        workspaceUpdate = { path: workspacePath, content: updated }
+      }
+    }
+  }
+
+  if (args.dryRun) {
+    console.log(`create-tpt-companion (dry run): would create ${args.lang} companion at ${target}`)
+    for (const [relative] of files) console.log(`  ${relative}`)
+    if (workspaceUpdate) console.log(`  + register "${args.name}/" in ${workspaceUpdate.path}`)
+    return
+  }
+
   for (const [relative, content] of files) {
     const absolute = join(target, relative)
     mkdirSync(dirname(absolute), { recursive: true })
     writeFileSync(absolute, content)
   }
-
-  // Convenience: register TS companions with a pnpm workspace at the target
-  // root, when one exists and doesn't already list the package.
-  if (args.lang === 'ts') {
-    const workspacePath = join(args.dir, 'pnpm-workspace.yaml')
-    if (existsSync(workspacePath)) {
-      const workspace = readFileSync(workspacePath, 'utf8')
-      if (!workspace.includes(`"${args.name}/"`)) {
-        const updated = workspace.replace(
-          /packages:\s*\n((?:\s*-\s*"[^"]+"\n?)*)/,
-          (m, list) => `packages:\n${list.endsWith('\n') ? list : list + '\n'}  - "${args.name}/"\n`,
-        )
-        writeFileSync(workspacePath, updated)
-        console.log(`create-tpt-companion: added "${args.name}/" to pnpm-workspace.yaml`)
-      }
-    }
+  if (workspaceUpdate) {
+    writeFileSync(workspaceUpdate.path, workspaceUpdate.content)
+    console.log(`create-tpt-companion: added "${args.name}/" to pnpm-workspace.yaml`)
   }
 
   console.log(`create-tpt-companion: created ${args.lang} companion at ${target}`)

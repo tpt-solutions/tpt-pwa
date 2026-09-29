@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
 )
@@ -109,6 +110,13 @@ func (e *Executor) Execute(ctx context.Context, task queue.Task) error {
 	for {
 		var request protocolRequest
 		if err := decoder.Decode(&request); err != nil {
+			// Kill BEFORE waiting: a protocol error usually means the engine
+			// is wedged (or produced garbage while still alive), and Wait
+			// blocks until the process exits -- waiting first would deadlock
+			// this goroutine until the task timeout.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			waitErr := cmd.Wait()
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -126,11 +134,16 @@ func (e *Executor) Execute(ctx context.Context, task queue.Task) error {
 			return fmt.Errorf("encode response: %w", err)
 		}
 		if _, err := fmt.Fprintln(stdin, string(payload)); err != nil {
-			_ = cmd.Wait()
+			// A write failure means the engine is gone (broken pipe) or the
+			// task was cancelled; make sure it is reaped either way.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			waitErr := cmd.Wait()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("write to engine: %w", err)
+			return fmt.Errorf("write to engine: %w (exit: %v)", err, waitErr)
 		}
 	}
 }
@@ -191,7 +204,9 @@ func (e *Executor) post(ctx context.Context, url string, body json.RawMessage) (
 	req.Header.Set("content-type", "application/json")
 	client := e.Client
 	if client == nil {
-		client = http.DefaultClient
+		// Bounded default: an unbounded client lets one stalled endpoint
+		// request occupy a scheduler slot until the task timeout.
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	resp, err := client.Do(req)
 	if err != nil {

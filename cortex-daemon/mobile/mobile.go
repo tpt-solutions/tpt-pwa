@@ -30,7 +30,12 @@ var (
 // background goroutines and returns immediately. Idempotent while running.
 // queueDir is created on demand and holds queue.json plus the fs.write
 // sandbox.
-func Start(addr, queueDir, syncEndpoint string) error {
+//
+// token is REQUIRED: on a phone every app can reach the loopback port, so
+// /rpc upgrades must present it (the host app hands the same token to the
+// WebView's PWA, e.g. as the `token` query parameter). An empty token fails
+// rather than silently trusting the whole device.
+func Start(addr, queueDir, syncEndpoint, token string) error {
 	mu.Lock()
 	if running {
 		mu.Unlock()
@@ -46,6 +51,10 @@ func Start(addr, queueDir, syncEndpoint string) error {
 		mu.Unlock()
 		return errors.New("mobile: queueDir is required")
 	}
+	if token == "" {
+		mu.Unlock()
+		return errors.New("mobile: token is required (shared secret for /rpc)")
+	}
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	cfg := server.Config{
 		Addr:         addr,
@@ -54,6 +63,7 @@ func Start(addr, queueDir, syncEndpoint string) error {
 		DataDir:      filepath.Join(queueDir, "data"),
 		PollEvery:    5 * time.Second,
 		MaxAttempts:  8,
+		AuthToken:    token,
 	}
 	cancel = ctxCancel
 	running = true

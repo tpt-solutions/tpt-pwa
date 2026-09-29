@@ -28,6 +28,38 @@ tpt-pwa is a **framework you fork or scaffold from**, not a packaged end-user ap
 
 Progress is tracked in [TODO.md](TODO.md). This project accepts **issues only, not pull requests** — see [CONTRIBUTING.md](CONTRIBUTING.md). The shared [JSON-RPC contract](docs/jsonrpc-contract.md) is the reference for the wire protocol. Formal-verification scope for the engine lives in [docs/formal-verification.md](docs/formal-verification.md).
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph browser["Browser / WebView (untrusted by design)"]
+        PWA["tpt-pwa (Svelte + TS)<br/>optimistic UI · outbox · CRDT mirror"]
+        SW["Service Worker (~2KB)<br/>cache-first shell + sync relay"]
+        PWA --- SW
+    end
+
+    subgraph native["Local native layer (the only OS-trusted side)"]
+        D["cortex-daemon (Go)<br/>JSON-RPC 2.0 · persistent queue · scheduler"]
+        E["cortex-engine (Rust)<br/>.ctx bytecode VM"]
+        D -- "stdio host protocol<br/>(native.db / net / http)" --> E
+    end
+
+    subgraph hosts["Companion hosts"]
+        A["cortex-android<br/>foreground service + bridge"]
+        T["cortex-shell (Tauri)<br/>desktop shell + sidecar"]
+    end
+
+    PWA -- "ws://127.0.0.1:9911/rpc<br/>(loopback JSON-RPC, optional token)" --> D
+    A --> D
+    T --> D
+    D -- "HTTPS push<br/>(sync endpoint, with retry/dead-letter)" --> S["Your sync backend"]
+    E -. "runs each task's script" .-> D
+
+    click "https://github.com/tpt-solutions/tpt-pwa/blob/master/docs/jsonrpc-contract.md" "JSON-RPC contract"
+```
+
+Capability negotiation is the framework's core rule: the PWA has exactly ONE branch point — "is the daemon reachable?" — and degrades to Service Worker + IndexedDB + background sync when it isn't. There is no per-OS code anywhere in `pwa/`.
+
 ## Quickstart
 
 Prerequisites: Node 22+, pnpm 11, Go 1.25, Rust 1.85+ (stable).
@@ -56,7 +88,21 @@ With both running, the app's header chip flips to **cortex connected** and notes
 
 There is no `.env` indirection on purpose: the daemon is flag-driven (see `go run ./cortex-daemon/cmd/cortex-daemon -h`) and the PWA needs no configuration.
 
+Before blaming the daemon, run its pre-flight check: `go run ./cortex-daemon/cmd/cortex-daemon doctor` (port, origin, auth, queue, data-dir, engine, sync endpoint; `--json` for tooling). More help: [docs/troubleshooting.md](docs/troubleshooting.md).
+
 Install the git hooks (pre-commit mirror of CI): `pnpm run hooks:setup`.
+
+### Documentation map
+
+| Doc | Contents |
+| --- | --- |
+| [docs/jsonrpc-contract.md](docs/jsonrpc-contract.md) | The wire protocol shared by PWA, daemon, and Android bridge |
+| [docs/language-reference.md](docs/language-reference.md) | The `.ctx` DSL: syntax, types, natives, budgets |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Port 9911, Android WebView cleartext, Windows firewall, corrupt queues |
+| [examples/recipes/](examples/recipes/) | Copy-paste `.ctx` recipes with tests (retry-upload, periodic fetch, batch sync) |
+| [docs/formal-verification.md](docs/formal-verification.md) | What "safe to run hostile scripts" means here, and how it's checked |
+| [SECURITY.md](SECURITY.md) | Trust boundaries, token handling, reporting process |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes per release |
 
 ## License
 

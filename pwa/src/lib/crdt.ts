@@ -9,7 +9,13 @@ export type CrdtBinary = Uint8Array
 
 let modulePromise: Promise<AutomergeModule | null> | null = null
 
-/** Load automerge-rs Wasm lazily; `null` means the environment can't run it and the app proceeds without the CRDT mirror. */
+/**
+ * Load automerge-rs Wasm lazily; `null` means this attempt failed and the
+ * caller proceeds without the CRDT mirror. A failed load is NOT memoized
+ * (the module promise resets) so a later mutation can retry -- e.g. after a
+ * transient instantiation failure -- instead of being disabled for the whole
+ * session.
+ */
 function loadAutomerge(): Promise<AutomergeModule | null> {
   modulePromise ??= import('@automerge/automerge-wasm')
     .then(async (mod) => {
@@ -21,6 +27,7 @@ function loadAutomerge(): Promise<AutomergeModule | null> {
     })
     .catch((error) => {
       warnDev('crdt', error)
+      modulePromise = null // allow a retry on the next mutation
       return null
     })
   return modulePromise
@@ -41,6 +48,12 @@ function loadAutomerge(): Promise<AutomergeModule | null> {
  * `upsertNote` reuses a note's existing field map, so concurrent edits to
  * DIFFERENT fields merge field-by-field; concurrent edits to the same field
  * resolve last-writer-wins.
+ *
+ * Deletes are TOMBSTONED, not removed: `removeNote` stamps `deletedAt` into
+ * the note's field map. A hard removal loses to any concurrent edit (the
+ * edit's map survives the merge and resurrects the note); a tombstone is
+ * just another field, so `deletedAt` wins by the same LWW rule as content
+ * and `notes()` filters it out on every replica.
  *
  * Scaffold for future multi-device sync: the daemon will ferry these opaque
  * binaries between devices (cortex.task kind "crdtMerge"); local persistence
@@ -75,13 +88,25 @@ export class NoteDoc {
     this.#doc.put(fieldsId, 'createdAt', note.createdAt)
     this.#doc.put(fieldsId, 'updatedAt', note.updatedAt)
     this.#doc.put(fieldsId, 'syncedAt', note.syncedAt)
+    // Only ever WRITE tombstones: this automerge-wasm preview misbehaves
+    // when `put` stores a `null` scalar (later loads of the save lose ops),
+    // and a delete is final anyway -- absence of the key means live.
+    if (note.deletedAt !== null) this.#doc.put(fieldsId, 'deletedAt', note.deletedAt)
   }
 
-  removeNote(id: string): void {
-    this.#doc.delete('_root', id)
+  /**
+   * Tombstone a note in the mirror: concurrent content edits merge
+   * alongside it, but `deletedAt` survives as the newest field write and
+   * `notes()` filters the note out on every replica.
+   */
+  removeNote(id: string, deletedAt = Date.now()): void {
+    const existing = this.#doc.getWithType('_root', id)
+    const fieldsId =
+      existing && existing[0] === 'map' ? existing[1] : this.#doc.putObject('_root', id, {})
+    this.#doc.put(fieldsId, 'deletedAt', deletedAt)
   }
 
-  /** Snapshot of every note currently in the CRDT, newest first. */
+  /** Live (non-tombstoned) notes, newest first. */
   notes(): Note[] {
     const notes: Note[] = []
     for (const id of this.#doc.keys('_root')) {
@@ -93,8 +118,10 @@ export class NoteDoc {
       const createdAt = this.#doc.get(fieldsId, 'createdAt')
       const updatedAt = this.#doc.get(fieldsId, 'updatedAt')
       const syncedAt = this.#doc.get(fieldsId, 'syncedAt')
+      const deletedAt = this.#doc.get(fieldsId, 'deletedAt')
       if (typeof title !== 'string' || typeof body !== 'string' || typeof createdAt !== 'number' || typeof updatedAt !== 'number') continue
-      notes.push({ id, title, body, createdAt, updatedAt, syncedAt: typeof syncedAt === 'number' ? syncedAt : null })
+      if (typeof deletedAt === 'number') continue // tombstoned on some replica
+      notes.push({ id, title, body, createdAt, updatedAt, syncedAt: typeof syncedAt === 'number' ? syncedAt : null, deletedAt: null })
     }
     return notes.sort((a, b) => b.updatedAt - a.updatedAt)
   }
@@ -103,14 +130,22 @@ export class NoteDoc {
   async merge(remote: CrdtBinary): Promise<boolean> {
     const mod = await loadAutomerge()
     if (!mod) return false
+    let other: AutomergeDoc | null = null
     try {
-      const other = mod.load(remote)
+      other = mod.load(remote)
       this.#doc.merge(other)
-      other.free()
       return true
     } catch (error) {
       warnDev('crdt', error)
       return false
+    } finally {
+      // Free the peer doc on every path: the wasm memory backing it is
+      // manual-lifetime and leaks otherwise.
+      try {
+        other?.free()
+      } catch {
+        /* already freed by a failed load/merge */
+      }
     }
   }
 

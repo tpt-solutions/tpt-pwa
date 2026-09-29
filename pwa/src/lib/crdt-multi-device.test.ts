@@ -13,7 +13,7 @@ import type { Note } from './storage'
  * devices (a `crdtMerge` cortex task); locally it is the same merge call.
  */
 function note(id: string, title: string, body: string, updatedAt: number): Note {
-  return { id, title, body, createdAt: 1000, updatedAt, syncedAt: null }
+  return { id, title, body, createdAt: 1000, updatedAt, syncedAt: null, deletedAt: null }
 }
 
 it('two devices editing the same note offline converge without losing either write', async () => {

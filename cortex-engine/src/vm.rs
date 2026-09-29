@@ -6,6 +6,7 @@
 //! (the DSL has no `while`, but a hostile script could still jump forever).
 
 use std::fmt;
+use std::rc::Rc;
 
 use crate::bytecode::{Instr, NativeId, Program};
 use crate::natives::NativeEnv;
@@ -25,6 +26,15 @@ pub enum VmError {
     UndefinedMember {
         field: String,
     },
+    /// A list access with an index the list does not have -- a DATA problem
+    /// in the script's inputs, not a malformed program (retrying with
+    /// different data can succeed).
+    IndexOutOfRange {
+        index: i64,
+        len: usize,
+    },
+    /// Integer arithmetic overflowed i64 -- data-driven, like index errors.
+    Overflow,
     Native(String),
     BudgetExhausted,
     BadProgram(&'static str),
@@ -38,6 +48,10 @@ impl fmt::Display for VmError {
                 write!(f, "type mismatch: expected {expected}, found {found}")
             }
             VmError::UndefinedMember { field } => write!(f, "undefined member `{field}`"),
+            VmError::IndexOutOfRange { index, len } => {
+                write!(f, "list index {index} out of range (len {len})")
+            }
+            VmError::Overflow => write!(f, "integer overflow"),
             VmError::Native(message) => write!(f, "native call failed: {message}"),
             VmError::BudgetExhausted => write!(f, "instruction budget exhausted"),
             VmError::BadProgram(reason) => write!(f, "malformed program: {reason}"),
@@ -113,10 +127,9 @@ impl<'env> Vm<'env> {
                 Instr::Add => {
                     let (rhs, lhs) = (self.pop()?, self.pop()?);
                     let sum = match (lhs, rhs) {
-                        (Value::Int(a), Value::Int(b)) => a
-                            .checked_add(b)
-                            .map(Value::Int)
-                            .ok_or(VmError::BadProgram("integer overflow"))?,
+                        (Value::Int(a), Value::Int(b)) => {
+                            a.checked_add(b).map(Value::Int).ok_or(VmError::Overflow)?
+                        }
                         (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
                         (Value::Str(a), Value::Str(b)) => Value::Str(a + &b),
                         (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 + b),
@@ -130,10 +143,9 @@ impl<'env> Vm<'env> {
                 Instr::Sub => {
                     let (rhs, lhs) = (self.pop()?, self.pop()?);
                     let diff = match (lhs, rhs) {
-                        (Value::Int(a), Value::Int(b)) => a
-                            .checked_sub(b)
-                            .map(Value::Int)
-                            .ok_or(VmError::BadProgram("integer overflow"))?,
+                        (Value::Int(a), Value::Int(b)) => {
+                            a.checked_sub(b).map(Value::Int).ok_or(VmError::Overflow)?
+                        }
                         (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
                         (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 - b),
                         (Value::Float(a), Value::Int(b)) => Value::Float(a - b as f64),
@@ -214,9 +226,21 @@ impl<'env> Vm<'env> {
                     let list = self.pop()?;
                     match (list, index) {
                         (Value::List(items), Value::Int(index)) => {
-                            let item = items
-                                .get(index as usize)
-                                .ok_or(VmError::BadProgram("list index out of range"))?;
+                            let item = match items.get(index as usize) {
+                                // Negative indices must not wrap through the
+                                // `as usize` cast into a bogus lookup.
+                                item if index >= 0 => item,
+                                _ => {
+                                    return Err(VmError::IndexOutOfRange {
+                                        index,
+                                        len: items.len(),
+                                    })
+                                }
+                            };
+                            let item = item.ok_or(VmError::IndexOutOfRange {
+                                index,
+                                len: items.len(),
+                            })?;
                             self.stack.push(item.clone());
                         }
                         (Value::List(_), other) => {
@@ -240,6 +264,12 @@ impl<'env> Vm<'env> {
                 Instr::JumpIfFalse(target) => {
                     let cond = self.pop()?;
                     if !cond.truthy() {
+                        pc = self.target(target)?;
+                    }
+                }
+                Instr::JumpIfTrue(target) => {
+                    let cond = self.pop()?;
+                    if cond.truthy() {
                         pc = self.target(target)?;
                     }
                 }
@@ -280,7 +310,7 @@ impl<'env> Vm<'env> {
             NativeId::DbQuery => {
                 let (sql, params) = sql_args(args)?;
                 let rows = self.env.db_query(&sql, &params).map_err(VmError::Native)?;
-                Value::List(rows)
+                Value::List(Rc::new(rows))
             }
             NativeId::DbExec => {
                 let (sql, params) = sql_args(args)?;
@@ -326,19 +356,19 @@ fn sql_args(args: Vec<Value>) -> Result<(String, Vec<Value>), VmError> {
 }
 
 fn compare(lhs: &Value, rhs: &Value) -> Result<std::cmp::Ordering, VmError> {
-    match (lhs, rhs) {
-        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
-        (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
-        (Value::Int(a), Value::Float(b)) => Ok((*a as f64)
-            .partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Less)),
-        (Value::Float(a), Value::Int(b)) => Ok(a
-            .partial_cmp(&(*b as f64))
-            .unwrap_or(std::cmp::Ordering::Less)),
-        (Value::Float(a), Value::Float(b)) => {
-            Ok(a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less))
+    match lhs.total_cmp(rhs) {
+        Some(ordering) => Ok(ordering),
+        // NaN has no ordering: report it as the data problem it is instead of
+        // silently ordering it "less than everything".
+        None if matches!(lhs, Value::Float(a) if a.is_nan())
+            || matches!(rhs, Value::Float(b) if b.is_nan()) =>
+        {
+            Err(VmError::TypeMismatch {
+                expected: "an orderable number",
+                found: "NaN",
+            })
         }
-        (lhs, rhs) => Err(type_mismatch("comparable values", lhs, rhs)),
+        None => Err(type_mismatch("comparable values", lhs, rhs)),
     }
 }
 
@@ -402,7 +432,7 @@ mod tests {
     fn integer_overflow_is_an_error_not_a_panic() {
         let err =
             run("task t() -> void { return 9223372036854775807 + 1; }").expect_err("must overflow");
-        assert_eq!(err, VmError::BadProgram("integer overflow"));
+        assert_eq!(err, VmError::Overflow);
     }
 
     #[test]
@@ -472,5 +502,163 @@ mod tests {
         assert!(run("task t() -> void { return 1 + \"a\"; }").is_err());
         assert!(run("task t() -> void { return 1 < \"x\"; }").is_err());
         assert!(run("task t() -> void { let x = 1; return x.field; }").is_err());
+    }
+}
+
+#[cfg(test)]
+mod short_circuit_and_data_tests {
+    use super::*;
+    use crate::compiler::compile;
+    use crate::natives::{row, MemoryNative, NativeRegistry};
+    use crate::parser::parse_task;
+
+    fn run(source: &str) -> Result<Value, VmError> {
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative::default();
+        Vm::new(program, &mut env, &registry).run()
+    }
+
+    fn run_with(source: &str, env: &mut MemoryNative) -> Result<Value, VmError> {
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        Vm::new(program, env, &registry).run()
+    }
+
+    #[test]
+    fn and_short_circuits_the_right_side() {
+        // `false && …` must not fire the http.post on the right side.
+        let source = r#"
+            task t() -> void {
+                return false && native.http.post("https://side-effect", 1);
+            }
+        "#;
+        let mut env = MemoryNative::default();
+        assert_eq!(run_with(source, &mut env).unwrap(), Value::Bool(false));
+        assert!(
+            env.posts.is_empty(),
+            "right side of && ran despite false lhs"
+        );
+    }
+
+    #[test]
+    fn or_short_circuits_the_right_side() {
+        let source = r#"
+            task t() -> void {
+                return true || native.http.post("https://side-effect", 1);
+            }
+        "#;
+        let mut env = MemoryNative::default();
+        assert_eq!(run_with(source, &mut env).unwrap(), Value::Bool(true));
+        assert!(
+            env.posts.is_empty(),
+            "right side of || ran despite true lhs"
+        );
+    }
+
+    #[test]
+    fn short_circuit_results_are_bools_and_both_sides_run_when_needed() {
+        let mut env = MemoryNative::default();
+        assert_eq!(
+            run_with("task t() -> void { return 1 < 2 && 3 < 4; }", &mut env).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_with("task t() -> void { return 0 || \"x\"; }", &mut env).unwrap(),
+            Value::Bool(true) // truthy("x"), not the raw value
+        );
+    }
+
+    #[test]
+    fn nan_comparisons_are_data_errors_not_silent_orderings() {
+        // NaN reaches the VM through host data (the DSL has no float ops that
+        // produce it): a row carrying NaN must make ordering an error rather
+        // than silently comparing as "less than everything".
+        let source = r#"
+            task t() -> void {
+                let rows = native.db.query("SELECT nan");
+                return rows[0].v < 1;
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: vec![row(&[("v", Value::Float(f64::NAN))])],
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry);
+        assert_eq!(
+            vm.run().unwrap_err(),
+            VmError::TypeMismatch {
+                expected: "an orderable number",
+                found: "NaN"
+            }
+        );
+    }
+
+    #[test]
+    fn mixed_int_float_comparisons_are_exact() {
+        // 2^53 + 1 is not representable as f64: the old f64 cast compared it
+        // equal to 2^53. Exact comparison must keep them distinct.
+        assert_eq!(
+            run("task t() -> void { return 9007199254740993 > 9007199254740992.0; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return 9007199254740992.0 < 9007199254740993; }").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run("task t() -> void { return 0 - 9007199254740993 < 0.0 - 9007199254740992.0; }")
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn list_index_errors_are_data_errors_with_context() {
+        let source = r#"
+            task t() -> void {
+                let rows = native.db.query("SELECT 1");
+                return rows[7];
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: vec![row(&[("id", Value::Int(1))])],
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry);
+        assert_eq!(
+            vm.run().unwrap_err(),
+            VmError::IndexOutOfRange { index: 7, len: 1 }
+        );
+    }
+
+    #[test]
+    fn negative_indices_do_not_wrap_around() {
+        let source = r#"
+            task t() -> void {
+                let rows = native.db.query("s");
+                return rows[0 - 1];
+            }
+        "#;
+        let task = parse_task(source).expect("parses");
+        let program = compile(&task).expect("compiles");
+        let registry = NativeRegistry::standard();
+        let mut env = MemoryNative {
+            rows: vec![row(&[("id", Value::Int(1))])],
+            ..MemoryNative::default()
+        };
+        let mut vm = Vm::new(program, &mut env, &registry);
+        assert_eq!(
+            vm.run().unwrap_err(),
+            VmError::IndexOutOfRange { index: -1, len: 1 }
+        );
     }
 }

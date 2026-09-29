@@ -17,8 +17,10 @@ node tools/create-tpt-companion --name cortex-weather --lang go \
 | `--lang` (required) | `go` · `rust` · `ts` |
 | `--description` | one-liner for the manifest + README |
 | `--dir` | target root (defaults to the current directory) |
+| `--dry-run` | print the file plan and exit without writing |
+| `--force` | allow writing into a target directory that already exists |
 
-TS companions are registered into a `pnpm-workspace.yaml` at the target root automatically (skipped when already listed); run `pnpm install` afterwards.
+TS companions are registered into a `pnpm-workspace.yaml` at the target root automatically (skipped when already listed; the tool fails with the manual edit to make when the packages list can't be parsed); run `pnpm install` afterwards.
 
 ## What you get
 

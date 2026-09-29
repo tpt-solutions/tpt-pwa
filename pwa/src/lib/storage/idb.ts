@@ -1,10 +1,12 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
-import type { Note, NoteId, NoteStorage, SyncOutboxEntry } from './types'
+import type { DeadLetter, Note, NoteId, NoteStorage, SyncOutboxEntry } from './types'
+import { normalizeNote } from './types'
 
 const DB_NAME = 'tpt-pwa'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const NOTES = 'notes'
 const OUTBOX = 'sync_outbox'
+const DEAD = 'dead_letters'
 
 /**
  * Fallback on-device store (spec §4 Path B): plain IndexedDB, the lowest
@@ -37,6 +39,10 @@ export class IndexedDBStorage implements NoteStorage {
           const store = db.createObjectStore(OUTBOX, { keyPath: 'id' })
           store.createIndex('queuedAt', 'queuedAt')
         }
+        if (!db.objectStoreNames.contains(DEAD)) {
+          const store = db.createObjectStore(DEAD, { keyPath: 'entry.id' })
+          store.createIndex('failedAt', 'failedAt')
+        }
       }
       open.onsuccess = () => resolve(open.result)
       open.onerror = () => reject(open.error ?? new Error('IndexedDB open failed'))
@@ -60,19 +66,43 @@ export class IndexedDBStorage implements NoteStorage {
 
   async listNotes(): Promise<Note[]> {
     const notes = await this.#request<Note[]>(NOTES, 'readonly', (os) => os.getAll() as IDBRequest<Note[]>)
-    return notes.sort((a, b) => b.updatedAt - a.updatedAt)
+    return notes
+      .map(normalizeNote)
+      .filter((note) => note.deletedAt === null)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
   async getNote(id: NoteId): Promise<Note | undefined> {
-    return this.#request<Note | undefined>(NOTES, 'readonly', (os) => os.get(id) as IDBRequest<Note | undefined>)
+    const note = await this.#request<Note | undefined>(NOTES, 'readonly', (os) => os.get(id) as IDBRequest<Note | undefined>)
+    if (!note || note.deletedAt !== null) return undefined
+    return normalizeNote(note)
   }
 
   async upsertNote(note: Note): Promise<void> {
-    await this.#request(NOTES, 'readwrite', (os) => os.put(note))
+    await this.#request(NOTES, 'readwrite', (os) => os.put(normalizeNote(note)))
   }
 
   async deleteNote(id: NoteId): Promise<void> {
     await this.#request(NOTES, 'readwrite', (os) => os.delete(id))
+  }
+
+  async markSyncedNote(id: NoteId, syncedAt: number, maxUpdatedAt: number): Promise<void> {
+    const db = this.#mustInit()
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(NOTES, 'readwrite')
+      const os = tx.objectStore(NOTES)
+      const get = os.get(id)
+      get.onsuccess = () => {
+        const note = get.result as Note | undefined
+        // Conditional inside the transaction: the stamp only lands when the
+        // stored revision is the one that was pushed and not yet stamped.
+        if (note && note.updatedAt <= maxUpdatedAt && note.syncedAt === null) {
+          os.put({ ...note, syncedAt })
+        }
+      }
+      tx.oncomplete = () => resolve()
+      tx.onabort = tx.onerror = () => reject(tx.error ?? new Error('markSynced transaction failed'))
+    })
   }
 
   async enqueue(entry: SyncOutboxEntry): Promise<void> {
@@ -86,5 +116,15 @@ export class IndexedDBStorage implements NoteStorage {
   async pendingQueue(): Promise<SyncOutboxEntry[]> {
     const entries = await this.#request<SyncOutboxEntry[]>(OUTBOX, 'readonly', (os) => os.getAll() as IDBRequest<SyncOutboxEntry[]>)
     return entries.sort((a, b) => a.queuedAt - b.queuedAt)
+  }
+
+  async deadLetter(entry: SyncOutboxEntry, reason: string): Promise<void> {
+    const record: DeadLetter = { entry, reason, failedAt: Date.now() }
+    await this.#request(DEAD, 'readwrite', (os) => os.put(record))
+  }
+
+  async deadLetters(): Promise<DeadLetter[]> {
+    const letters = await this.#request<DeadLetter[]>(DEAD, 'readonly', (os) => os.getAll() as IDBRequest<DeadLetter[]>)
+    return letters.sort((a, b) => b.failedAt - a.failedAt)
   }
 }

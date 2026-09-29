@@ -6,13 +6,14 @@
   "license": "MIT OR Apache-2.0",
   "scripts": {
     "dev": "pnpm --filter tpt-pwa dev",
-    "dev:daemon": "go run ./cortex-daemon/cmd/cortex-daemon",
+    "dev:daemon": "cd cortex-daemon && go run ./cmd/cortex-daemon",
     "dev:shell": "pnpm --filter cortex-shell dev",
     "build": "pnpm --filter tpt-pwa build",
     "check": "pnpm --filter tpt-pwa check",
     "test": "pnpm --filter tpt-pwa test && cd cortex-daemon && go test ./... && cd ../cortex-engine && cargo test",
     "icons": "pnpm --filter tpt-pwa icons",
     "hooks:setup": "git config core.hooksPath scripts/githooks",
-    "scaffold": "node tools/create-tpt-companion/index.mjs"
+    "scaffold": "node tools/create-tpt-companion/index.mjs",
+    "scaffold:app": "node tools/create-tpt-pwa/index.mjs"
   }
 }

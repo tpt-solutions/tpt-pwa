@@ -47,6 +47,8 @@ pub enum Instr {
     Jump(u16),
     /// pop condition; jump if falsy
     JumpIfFalse(u16),
+    /// pop condition; jump if truthy (short-circuit `||`)
+    JumpIfTrue(u16),
     /// halt, returning top of stack (or null on empty stack)
     Return,
 }

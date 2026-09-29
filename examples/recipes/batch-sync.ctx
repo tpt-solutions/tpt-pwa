@@ -1,0 +1,17 @@
+// Recipe: batch-sync
+// Drain the outbox in one pass, newest first, and stop at the first
+// transport failure so the daemon re-queues cleanly. The health probe on the
+// right of `&&` only fires when connectivity already reported true --
+// short-circuit keeps the offline case free of side effects.
+//
+// Test: examples/recipes/recipes_test.rs
+task batchSync() -> void {
+    let batch = native.db.query("SELECT id, action, payload FROM outbox ORDER BY queuedAt DESC");
+    let healthy = native.net.isConnected() && native.http.post("https://api.example.com/health", "ping");
+    if healthy {
+        for row in batch {
+            native.http.post("https://api.example.com/sync", row);
+            native.db.exec("DELETE FROM outbox WHERE id = ?", row.id);
+        }
+    }
+}

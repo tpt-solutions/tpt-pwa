@@ -95,3 +95,59 @@ func TestFailureRequeuesThenParksAfterMaxAttempts(t *testing.T) {
 		t.Fatalf("expected exactly maxAttempts executor runs, got %d", len(exec.tasks))
 	}
 }
+
+// A hung executor must not hold the serial queue: the per-task deadline
+// cancels its context and the task is retried later (timeout = transient).
+func TestTaskTimeoutBoundsOneExecution(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, _ := q.Enqueue("syncNotes", json.RawMessage(`{}`), time.Time{})
+	hung := &hungExecutor{started: make(chan struct{})}
+	s := &Scheduler{
+		Queue:       q,
+		Executor:    hung,
+		Connected:   func(context.Context) bool { return true },
+		MaxAttempts: 3,
+		TaskTimeout: 25 * time.Millisecond,
+	}
+	done := make(chan struct{})
+	go func() { s.Tick(context.Background()); close(done) }()
+	<-hung.started
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tick did not return despite the task timeout")
+	}
+	got, _ := q.Get(task.ID)
+	if got.State != queue.StateQueued || got.Attempts != 1 {
+		t.Fatalf("timed-out task should be requeued with 1 attempt, got %s/%d", got.State, got.Attempts)
+	}
+}
+
+type hungExecutor struct{ started chan struct{} }
+
+func (h *hungExecutor) Execute(ctx context.Context, _ queue.Task) error {
+	close(h.started)
+	<-ctx.Done() // block until the scheduler's deadline cancels us
+	return ctx.Err()
+}
+
+// A PermanentError parks the task as failed immediately, without burning
+// retry attempts.
+func TestPermanentFailureParksTaskWithoutRetries(t *testing.T) {
+	q, _, s := newFixture(t, []error{&queue.PermanentError{Err: errors.New("endpoint rejected entry with HTTP 422")}})
+	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
+	task, _ := q.Enqueue("syncNotes", body, time.Time{})
+
+	s.Tick(context.Background())
+
+	got, _ := q.Get(task.ID)
+	if got.State != queue.StateFailed {
+		t.Fatalf("permanent failure should park as failed, got %s", got.State)
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("permanent failure must not retry, got %d attempts", got.Attempts)
+	}
+}

@@ -1,7 +1,13 @@
 # Direct APK distribution for the cortex-android companion (spec §7: no app
-# store). On a version tag, builds the APKs and attaches them to a GitHub
-# release -- the PWA's companion page (pwa/public/companion.html) links
-# there.
+# store). On a version tag, builds the gomobile daemon .aar, signs the release
+# APK (when signing secrets are configured), and attaches both to the GitHub
+# release -- the PWA's companion page (pwa/public/companion.html) links there.
+#
+# Signing secrets (all optional; without them the unsigned APK is attached):
+#   APK_KEYSTORE_BASE64      -- base64 of the release keystore (.jks/.keystore)
+#   APK_KEYSTORE_PASSWORD    -- keystore password
+#   APK_KEY_ALIAS            -- key alias inside the keystore
+#   APK_KEY_PASSWORD         -- key password (defaults to the keystore password)
 name: Release
 
 on:
@@ -15,24 +21,69 @@ jobs:
   apk:
     name: Companion APK
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cortex-android
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew assembleRelease assembleDebug
-      - name: Attach APKs to the GitHub release
+
+      # The embedded Go daemon: gomobile bind produces the .aar that
+      # DaemonService loads reflectively (solutions.tpt.cortex.Mobile).
+      - name: Build the gomobile daemon .aar
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          NDK_DIR="$(ls -d "${ANDROID_HOME}/ndk/"* 2>/dev/null | head -1 || true)"
+          if [ -z "$NDK_DIR" ]; then
+            echo "No Android NDK found under ANDROID_HOME" >&2
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          cd cortex-daemon
+          "$(go env GOPATH)/bin/gomobile" bind \
+            -o ../cortex-android/app/libs/cortex.aar \
+            -target=android -androidapi 26 \
+            -javapkg=solutions.tpt.cortex ./mobile
+
+      - name: Decode the signing keystore
+        id: keystore
+        env:
+          APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$APK_KEYSTORE_BASE64" ]; then
+            mkdir -p cortex-android/keystore
+            printf '%s' "$APK_KEYSTORE_BASE64" | base64 -d > cortex-android/keystore/release.jks
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "APK_KEYSTORE_BASE64 not set -- the release APK stays unsigned"
+          fi
+
+      - name: Build APKs
+        working-directory: cortex-android
+        env:
+          CORTEX_RELEASE_KEYSTORE: ${{ steps.keystore.outputs.configured == 'true' && 'keystore/release.jks' || '' }}
+          CORTEX_RELEASE_STORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          CORTEX_RELEASE_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+          CORTEX_RELEASE_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease assembleDebug
+
+      - name: Attach artifacts to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "tpt-cortex $GITHUB_REF_NAME" \
-            --notes "Direct-download Android companion (no Play Store). See pwa/public/companion.html for install steps."
-          gh release upload "$GITHUB_REF_NAME" \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            app/build/outputs/apk/debug/app-debug.apk
+          RELEASE_APK="cortex-android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ -f "cortex-android/app/build/outputs/apk/release/app-release.apk" ]; then
+            RELEASE_APK="cortex-android/app/build/outputs/apk/release/app-release.apk"
+          fi
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --title "tpt-cortex $GITHUB_REF_NAME" \
+              --notes "Direct-download Android companion (no Play Store). See pwa/public/companion.html for install steps."
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            "$RELEASE_APK#tpt-cortex-release.apk" \
+            "cortex-android/app/build/outputs/apk/debug/app-debug.apk#tpt-cortex-debug.apk"

@@ -10,7 +10,12 @@
 //!
 //! Safety posture (see docs/formal-verification.md): the VM is total -- every
 //! instruction either steps or returns an error; there is no `unsafe`, no
-//! recursion, and a hard instruction budget bounds every loop.
+//! recursion, and a hard instruction budget bounds every loop. The parser
+//! bounds ITS recursion too (nesting depth and token caps, see
+//! `parser::MAX_NESTING_DEPTH`), which also keeps the AST's recursive `Drop`
+//! off the native stack's worst case; data errors (index range, overflow,
+//! NaN ordering) are distinct error variants, and the CLI reports permanent
+//! (parse/compile) vs transient (runtime) failures with exit codes 2 / 1.
 
 pub mod ast;
 pub mod bytecode;

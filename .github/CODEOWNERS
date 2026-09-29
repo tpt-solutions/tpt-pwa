@@ -1,0 +1,11 @@
+# Default owners: everything requires a review from the core team.
+*                       @tpt-solutions/core
+
+# Area specialists.
+/pwa/                   @tpt-solutions/core @tpt-solutions/web
+/cortex-daemon/         @tpt-solutions/core @tpt-solutions/systems
+/cortex-engine/         @tpt-solutions/core @tpt-solutions/systems
+/cortex-android/        @tpt-solutions/core @tpt-solutions/mobile
+/cortex-shell/          @tpt-solutions/core @tpt-solutions/desktop
+/docs/                  @tpt-solutions/core
+/.github/               @tpt-solutions/core

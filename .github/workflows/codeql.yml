@@ -1,0 +1,31 @@
+# CodeQL over the two code-heavy areas: the TypeScript PWA and the Go daemon.
+# (The Rust engine's safety story is tested + audited via cargo-audit.yml and
+# tests/safety.rs; CodeQL's Rust support is additive later.)
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { language: javascript-typescript, path: pwa }
+          - { language: go, path: cortex-daemon }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          source-root: ${{ matrix.path }}
+      - uses: github/codeql-action/analyze@v3

@@ -8,6 +8,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -72,10 +73,20 @@ func (s *Scheduler) tick(ctx context.Context) {
 		if _, err := s.Queue.Transition(task.ID, queue.StateRunning, "", s.MaxAttempts, now); err != nil {
 			continue
 		}
-		err := s.Executor.Execute(ctx, task)
+		// One task can never hold the serial queue hostage: each execution
+		// runs under its own deadline (a timeout is treated as transient).
+		execCtx, cancel := context.WithTimeout(ctx, s.TaskTimeout)
+		err := s.Executor.Execute(execCtx, task)
+		cancel()
+		var permanent *queue.PermanentError
 		switch {
 		case err == nil:
 			s.transition(task.ID, queue.StateCompleted, "", s.MaxAttempts)
+		case errors.As(err, &permanent):
+			// Retrying can never fix it (e.g. the endpoint rejected an entry
+			// with 4xx): park it for inspection right away.
+			log.Printf("scheduler: task %s (%s) failed permanently: %v", task.ID, task.Kind, err)
+			s.transition(task.ID, queue.StateFailed, err.Error(), s.MaxAttempts)
 		default:
 			log.Printf("scheduler: task %s (%s) attempt %d failed: %v", task.ID, task.Kind, task.Attempts+1, err)
 			s.transition(task.ID, queue.StateQueued, err.Error(), s.MaxAttempts)

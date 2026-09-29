@@ -62,6 +62,14 @@ impl Compiler {
         self.code.push(instr);
     }
 
+    /// A bytecode offset that is guaranteed to fit the u16 encoding: casting
+    /// `as u16` would silently wrap on programs past 65535 instructions.
+    fn offset(&self, index: usize) -> Result<u16, CompileError> {
+        u16::try_from(index).map_err(|_| CompileError {
+            message: "program exceeds 65535 instructions".into(),
+        })
+    }
+
     fn constant(&mut self, value: Value) -> Result<u16, CompileError> {
         let index = self
             .constants
@@ -130,17 +138,17 @@ impl Compiler {
                 self.stmts(then_branch)?;
                 match else_branch.is_empty() {
                     true => {
-                        let end = self.code.len();
-                        self.code[then_patch] = Instr::JumpIfFalse(end as u16);
+                        let end = self.offset(self.code.len())?;
+                        self.code[then_patch] = Instr::JumpIfFalse(end);
                     }
                     false => {
                         let else_patch = self.code.len();
                         self.emit(Instr::Jump(0));
-                        let else_start = self.code.len();
-                        self.code[then_patch] = Instr::JumpIfFalse(else_start as u16);
+                        let else_start = self.offset(self.code.len())?;
+                        self.code[then_patch] = Instr::JumpIfFalse(else_start);
                         self.stmts(else_branch)?;
-                        let end = self.code.len();
-                        self.code[else_patch] = Instr::Jump(end as u16);
+                        let end = self.offset(self.code.len())?;
+                        self.code[else_patch] = Instr::Jump(end);
                     }
                 }
             }
@@ -154,7 +162,7 @@ impl Compiler {
                 self.emit(Instr::Const(zero));
                 let idx_slot = self.declare("#idx")?;
                 self.emit(Instr::StoreLocal(idx_slot));
-                let loop_start = self.code.len();
+                let loop_start = self.offset(self.code.len())?;
                 // cond: idx < len(iter)
                 self.emit(Instr::LoadLocal(idx_slot));
                 self.emit(Instr::LoadLocal(iter_slot));
@@ -177,9 +185,9 @@ impl Compiler {
                 self.emit(Instr::Const(one));
                 self.emit(Instr::Add);
                 self.emit(Instr::StoreLocal(idx_slot));
-                self.emit(Instr::Jump(loop_start as u16));
-                let end = self.code.len();
-                self.code[exit_patch] = Instr::JumpIfFalse(end as u16);
+                self.emit(Instr::Jump(loop_start));
+                let end = self.offset(self.code.len())?;
+                self.code[exit_patch] = Instr::JumpIfFalse(end);
                 self.leave();
             }
             Stmt::Expr(expr) => {
@@ -271,25 +279,51 @@ impl Compiler {
                 self.expr(inner)?;
                 self.emit(Instr::Not);
             }
-            Expr::Binary { op, lhs, rhs } => {
-                // Note: && / || are evaluated eagerly in this skeleton (both
-                // sides always run); the DSL's only effects are native calls
-                // that are idempotent to probe. Short-circuiting is planned.
-                self.expr(lhs)?;
-                self.expr(rhs)?;
-                self.emit(match op {
-                    BinOp::Eq => Instr::Eq,
-                    BinOp::NotEq => Instr::NotEq,
-                    BinOp::Less => Instr::Less,
-                    BinOp::LessEq => Instr::LessEq,
-                    BinOp::Greater => Instr::Greater,
-                    BinOp::GreaterEq => Instr::GreaterEq,
-                    BinOp::Add => Instr::Add,
-                    BinOp::Sub => Instr::Sub,
-                    BinOp::And => Instr::And,
-                    BinOp::Or => Instr::Or,
-                });
-            }
+            Expr::Binary { op, lhs, rhs } => match op {
+                // `&&`/`||` short-circuit: the right side must not run (and
+                // its native calls must not fire) when the left side already
+                // decides the result. Shape for `a && b`:
+                //   eval a; JumpIfFalse(F); eval b; Not; Not; Jump(E)
+                //   F: Const false;  E:            (Not;Not normalises to bool)
+                // `a || b` mirrors it with JumpIfTrue / Const true.
+                BinOp::And | BinOp::Or => {
+                    self.expr(lhs)?;
+                    let side_patch = self.code.len();
+                    self.emit(match op {
+                        BinOp::And => Instr::JumpIfFalse(0),
+                        _ => Instr::JumpIfTrue(0),
+                    });
+                    self.expr(rhs)?;
+                    self.emit(Instr::Not);
+                    self.emit(Instr::Not);
+                    let end_patch = self.code.len();
+                    self.emit(Instr::Jump(0));
+                    let short_value = self.offset(self.code.len())?;
+                    self.code[side_patch] = match op {
+                        BinOp::And => Instr::JumpIfFalse(short_value),
+                        _ => Instr::JumpIfTrue(short_value),
+                    };
+                    let literal = self.constant(Value::Bool(*op == BinOp::Or))?;
+                    self.emit(Instr::Const(literal));
+                    let end = self.offset(self.code.len())?;
+                    self.code[end_patch] = Instr::Jump(end);
+                }
+                _ => {
+                    self.expr(lhs)?;
+                    self.expr(rhs)?;
+                    self.emit(match op {
+                        BinOp::Eq => Instr::Eq,
+                        BinOp::NotEq => Instr::NotEq,
+                        BinOp::Less => Instr::Less,
+                        BinOp::LessEq => Instr::LessEq,
+                        BinOp::Greater => Instr::Greater,
+                        BinOp::GreaterEq => Instr::GreaterEq,
+                        BinOp::Add => Instr::Add,
+                        BinOp::Sub => Instr::Sub,
+                        BinOp::And | BinOp::Or => unreachable!("handled above"),
+                    });
+                }
+            },
         }
         Ok(())
     }
@@ -379,5 +413,27 @@ mod tests {
         assert!(compile(&bad).is_err());
         let bare = parse_task("task t() -> void { let f = native.db.query; }").expect("parses");
         assert!(compile(&bare).is_err());
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use crate::parser::parse_task;
+
+    #[test]
+    fn programs_past_the_u16_encoding_are_a_compile_error_not_a_wraparound() {
+        // 33k flat expression statements (~66k instructions) followed by an
+        // `if`: the jump that closes it targets past u16::MAX. (A long
+        // `1 + 1 + …` chain is rejected earlier, by the parser's nesting
+        // bound; straight-line code has no jump targets to wrap.) The old
+        // `as u16` casts wrapped silently and produced a corrupt program;
+        // compilation must refuse.
+        let mut source = String::from("task t() -> void { ");
+        source.push_str(&"1; ".repeat(33_000));
+        source.push_str("if true { return; } }");
+        let task = parse_task(&source).expect("parses (flat, under the token cap)");
+        let err = compile(&task).expect_err("must refuse to emit wraparound jumps");
+        assert!(err.message.contains("65535"), "got: {err}");
     }
 }

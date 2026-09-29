@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -17,10 +18,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/doctor"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/server"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		doctorCommand(os.Args[2:])
+		return
+	}
+
 	addr := flag.String("addr", "127.0.0.1:9911", "listen address (loopback only by design)")
 	syncEndpoint := flag.String("sync-endpoint", "https://api.tpt/sync", "remote sync endpoint")
 	poll := flag.Duration("poll", 5*time.Second, "scheduler poll interval")
@@ -47,6 +54,41 @@ func main() {
 		AuthToken:    *authToken,
 	}); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// doctorCommand implements `cortex-daemon doctor`: pre-flight checks over the
+// same flags the daemon takes, linked from the PWA's cortex status chip.
+func doctorCommand(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:9911", "address the daemon will bind")
+	syncEndpoint := fs.String("sync-endpoint", "https://api.tpt/sync", "remote sync endpoint")
+	queuePath := fs.String("queue", defaultQueuePath(), "persistent task queue file")
+	dataDir := fs.String("data-dir", defaultDataDir(), "sandbox root for fs.write")
+	enginePath := fs.String("engine", "", "cortex-engine binary (optional)")
+	authToken := fs.String("auth-token", "", "auth token that will be required on /rpc (optional)")
+	asJSON := fs.Bool("json", false, "emit checks as JSON")
+	fs.Parse(args)
+
+	opts := doctor.Options{
+		Addr:         *addr,
+		SyncEndpoint: *syncEndpoint,
+		QueuePath:    *queuePath,
+		DataDir:      *dataDir,
+		EnginePath:   *enginePath,
+		AuthToken:    *authToken,
+	}
+	if *asJSON {
+		encoded, err := doctor.JSON(doctor.All(context.Background(), opts))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(string(encoded))
+		return
+	}
+	healthy := doctor.Run(context.Background(), opts, os.Stdout)
+	if !healthy {
+		os.Exit(1)
 	}
 }
 

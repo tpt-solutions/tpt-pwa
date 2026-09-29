@@ -10,9 +10,12 @@
     notes,
     online,
     pendingSync,
+    swUpdateReady,
   } from './lib/stores'
   import { createNote, deleteNote, refreshTelemetry, updateNote } from './lib/app'
   import { describeOutcome } from './lib/telemetry'
+  import { warnDev } from './lib/devlog'
+  import { applySwUpdate } from './main'
   import type { Note } from './lib/storage'
 
   type View = { name: 'list' } | { name: 'editor'; id: string }
@@ -63,10 +66,16 @@
   }
 
   async function newNote(): Promise<void> {
-    const note = await createNote('', '')
-    transition(() => {
-      view = { name: 'editor', id: note.id }
-    })
+    try {
+      const note = await createNote('', '')
+      transition(() => {
+        view = { name: 'editor', id: note.id }
+      })
+    } catch (error) {
+      // createNote already rolled the optimistic insert back; surface it in
+      // dev instead of leaving an unhandled rejection.
+      warnDev('app', error)
+    }
   }
 
   async function removeCurrent(): Promise<void> {
@@ -75,7 +84,11 @@
     transition(() => {
       view = { name: 'list' }
     })
-    await deleteNote(id)
+    try {
+      await deleteNote(id)
+    } catch (error) {
+      warnDev('app', error)
+    }
   }
 
   onMount(() => {
@@ -86,8 +99,13 @@
         installPrompt.set({ prompt: () => promptable.prompt!() })
       }
     }
+    const installed = () => installPrompt.set(null)
     window.addEventListener('beforeinstallprompt', handler)
-    return () => window.removeEventListener('beforeinstallprompt', handler)
+    window.addEventListener('appinstalled', installed)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handler)
+      window.removeEventListener('appinstalled', installed)
+    }
   })
 </script>
 
@@ -118,6 +136,11 @@
       </span>
       {#if $installPrompt}
         <button class="button button--small" onclick={() => $installPrompt?.prompt()}>Install</button>
+      {/if}
+      {#if $swUpdateReady}
+        <button class="button button--small" title="A new version finished downloading in the background" onclick={() => applySwUpdate()}>
+          Update ready
+        </button>
       {/if}
     </div>
   </header>

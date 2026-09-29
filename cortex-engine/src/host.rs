@@ -15,6 +15,7 @@
 //! peer can speak this from any language.
 
 use std::io::{BufRead, Write};
+use std::rc::Rc;
 
 use crate::natives::NativeEnv;
 use crate::value::Value;
@@ -46,12 +47,14 @@ pub fn json_to_value(json: &serde_json::Value) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         serde_json::Value::String(s) => Value::Str(s.clone()),
-        serde_json::Value::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
-        serde_json::Value::Object(map) => Value::Map(
+        serde_json::Value::Array(items) => {
+            Value::List(Rc::new(items.iter().map(json_to_value).collect()))
+        }
+        serde_json::Value::Object(map) => Value::Map(Rc::new(
             map.iter()
                 .map(|(k, v)| (k.clone(), json_to_value(v)))
                 .collect(),
-        ),
+        )),
     }
 }
 
@@ -118,7 +121,7 @@ impl<In: BufRead, Out: Write> NativeEnv for HostNative<In, Out> {
         let mut args = vec![Value::Str(sql.to_string())];
         args.extend(params.iter().cloned());
         match self.call("db.query", &args)? {
-            Value::List(rows) => Ok(rows),
+            Value::List(rows) => Ok((*rows).clone()),
             other => Err(format!(
                 "db.query returned {}, expected list",
                 other.type_name()

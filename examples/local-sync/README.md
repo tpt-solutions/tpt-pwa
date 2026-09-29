@@ -14,9 +14,19 @@ cortex-demo (as the PWA)          cortex-daemon                cortex-engine (Ru
   ◀── cortex.event.taskCompleted ──
 ```
 
-## Run it
+## Run it (one command)
 
-Three terminals, from the repo root:
+From the repo root:
+
+```sh
+sh examples/local-sync/run.sh          # macOS / Linux
+./examples/local-sync/run.ps1          # Windows (PowerShell)
+```
+
+The script builds the engine, starts the mock endpoint + daemon (engine-backed), enqueues one note, waits for `state: completed`, and tears everything down.
+
+<details>
+<summary>Or run the pieces by hand (three terminals, from the repo root)</summary>
 
 ```sh
 # 0. one-time: build the engine VM (for -engine mode)
@@ -27,7 +37,7 @@ go run ./cortex-daemon/cmd/cortex-demo serve-mock -addr 127.0.0.1:9999
 
 # 2. terminal 2 — the daemon, executing tasks through the Rust VM
 go run ./cortex-daemon/cmd/cortex-daemon \
-    -engine ./cortex-engine/target/debug/cortex-engine.exe \
+    -engine "$(go env GOOS 2>/dev/null; ls cortex-engine/target/debug/cortex-engine* | head -1)" \
     -sync-endpoint http://127.0.0.1:9999/sync
 
 # 3. terminal 3 — enqueue one note and watch it flow through
@@ -35,7 +45,9 @@ go run ./cortex-daemon/cmd/cortex-demo sync-once \
     -endpoint http://127.0.0.1:9999/sync
 ```
 
-Expected output in terminal 3: `ping` → `enqueued task <id>` → `cortex.event.taskCompleted` → `final status: ... state: completed`, and terminal 1 logs the pushed note row. (On Windows keep the `.exe` suffix; on other platforms drop it.)
+Expected output in terminal 3: `ping` → `enqueued task <id>` → `cortex.event.taskCompleted` → `final status: ... state: completed`, and terminal 1 logs the pushed note row.
+
+</details>
 
 ## Variations
 

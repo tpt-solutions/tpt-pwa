@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
@@ -29,8 +30,14 @@ import org.json.JSONObject
 class DaemonService : Service() {
 
     private val running = AtomicBoolean(false)
+    // Shared secret for /rpc: every app on the device can reach the loopback
+    // port, so the embedded daemon requires it (Mobile.start enforces a
+    // non-empty token). Regenerated per service instance and handed to the
+    // PWA via the cortex:auth DOM event.
+    private val daemonToken: String = UUID.randomUUID().toString()
     private val notificationListeners = CopyOnWriteArraySet<(method: String, params: JSONObject) -> Unit>()
     private val stateListeners = CopyOnWriteArraySet<(state: CortexBridge.State) -> Unit>()
+    private val authListeners = CopyOnWriteArraySet<(token: String) -> Unit>()
     private lateinit var bridge: CortexBridge
 
     inner class LocalBinder : Binder() {
@@ -50,6 +57,15 @@ class DaemonService : Service() {
             stateListeners.remove(listener)
         }
 
+        fun addAuthListener(listener: (token: String) -> Unit) {
+            authListeners.add(listener)
+            listener(daemonToken) // late binders (activity recreation) get it immediately
+        }
+
+        fun removeAuthListener(listener: (token: String) -> Unit) {
+            authListeners.remove(listener)
+        }
+
         val cortexBridge: CortexBridge
             get() = this@DaemonService.bridge
     }
@@ -59,7 +75,7 @@ class DaemonService : Service() {
     override fun onCreate() {
         super.onCreate()
         bridge = CortexBridge(
-            url = CortexBridge.DEFAULT_URL,
+            url = "$DEFAULT_BRIDGE_URL?token=$daemonToken",
             listener = object : CortexBridge.Listener {
                 override fun onStateChange(state: CortexBridge.State) {
                     Log.d(TAG, "daemon link: $state")
@@ -101,9 +117,10 @@ class DaemonService : Service() {
      */
     private fun startEmbeddedDaemon(): Boolean = try {
         val mobile = Class.forName(EMBEDDED_DAEMON_CLASS)
-        val start = mobile.getMethod("start", String::class.java, String::class.java, String::class.java)
+        // gomobile lowercases exported Go function names: Mobile.start.
+        val start = mobile.getMethod("start", String::class.java, String::class.java, String::class.java, String::class.java)
         val queueDir = getDir("cortex-queue", Context.MODE_PRIVATE).absolutePath
-        start.invoke(null, CortexBridge.DEFAULT_URL.removePrefix("ws://").removeSuffix("/rpc"), queueDir, null)
+        start.invoke(null, CortexBridge.hostOf(DEFAULT_BRIDGE_URL), queueDir, null, daemonToken)
         Log.i(TAG, "embedded cortex-daemon started (queue: $queueDir)")
         true
     } catch (t: Throwable) {
@@ -141,6 +158,9 @@ class DaemonService : Service() {
 
         /** gomobile bind -javapkg=solutions.tpt.cortex ./mobile produces this class. */
         private const val EMBEDDED_DAEMON_CLASS = "solutions.tpt.cortex.Mobile"
+
+        /** The in-process daemon endpoint; the service appends its ?token=. */
+        const val DEFAULT_BRIDGE_URL = "ws://127.0.0.1:9911/rpc"
 
         /** Convenience start entry point used by MainActivity. */
         fun start(context: Context) {

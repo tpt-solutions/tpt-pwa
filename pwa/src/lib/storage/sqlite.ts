@@ -1,5 +1,6 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
-import type { Note, NoteId, NoteStorage, SyncOutboxEntry } from './types'
+import type { DeadLetter, Note, NoteId, NoteStorage, SyncOutboxEntry } from './types'
+import { normalizeNote } from './types'
 
 type WaSQLite = typeof import('wa-sqlite')
 /** The wa-sqlite type defs expose SQLiteAPI as an ambient global interface; derive it instead of importing it. */
@@ -40,7 +41,19 @@ export class SQLiteStorage implements NoteStorage {
     sqlite3.vfs_register(vfs as unknown as Parameters<typeof sqlite3.vfs_register>[0], true)
     const db = await sqlite3.open_v2('tpt-pwa.sqlite3')
     await sqlite3.exec(db, SCHEMA)
+    await this.#migrate(db, sqlite3)
     this.#instance = { sqlite3, db }
+  }
+
+  /** In-place upgrades for databases created by older builds. */
+  async #migrate(db: number, sqlite3: SQLiteAPI): Promise<void> {
+    // `deletedAt` (tombstones) postdates the v1 schema; ALTER TABLE errors
+    // with "duplicate column name" when it already exists, which is fine.
+    try {
+      await sqlite3.exec(db, `ALTER TABLE notes ADD COLUMN deletedAt INTEGER`)
+    } catch {
+      /* column already present */
+    }
   }
 
   #mustInit(): { sqlite3: SQLiteAPI; db: number } {
@@ -52,7 +65,8 @@ export class SQLiteStorage implements NoteStorage {
     const { sqlite3, db } = this.#mustInit()
     const { rows } = await sqlite3.execWithParams(
       db,
-      `SELECT id, title, body, createdAt, updatedAt, syncedAt FROM notes ORDER BY updatedAt DESC`,
+      `SELECT id, title, body, createdAt, updatedAt, syncedAt, deletedAt FROM notes
+       WHERE deletedAt IS NULL ORDER BY updatedAt DESC`,
     )
     return rows.map(rowToNote)
   }
@@ -61,7 +75,7 @@ export class SQLiteStorage implements NoteStorage {
     const { sqlite3, db } = this.#mustInit()
     const { rows } = await sqlite3.execWithParams(
       db,
-      `SELECT id, title, body, createdAt, updatedAt, syncedAt FROM notes WHERE id = ?`,
+      `SELECT id, title, body, createdAt, updatedAt, syncedAt, deletedAt FROM notes WHERE id = ? AND deletedAt IS NULL`,
       [id],
     )
     return rows.length > 0 ? rowToNote(rows[0]) : undefined
@@ -71,20 +85,33 @@ export class SQLiteStorage implements NoteStorage {
     const { sqlite3, db } = this.#mustInit()
     await sqlite3.execWithParams(
       db,
-      `INSERT INTO notes (id, title, body, createdAt, updatedAt, syncedAt)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO notes (id, title, body, createdAt, updatedAt, syncedAt, deletedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
          updatedAt = excluded.updatedAt,
-         syncedAt = excluded.syncedAt`,
-      [note.id, note.title, note.body, note.createdAt, note.updatedAt, note.syncedAt ?? null],
+         syncedAt = excluded.syncedAt,
+         deletedAt = excluded.deletedAt`,
+      [note.id, note.title, note.body, note.createdAt, note.updatedAt, note.syncedAt ?? null, note.deletedAt ?? null],
     )
   }
 
   async deleteNote(id: NoteId): Promise<void> {
     const { sqlite3, db } = this.#mustInit()
     await sqlite3.execWithParams(db, `DELETE FROM notes WHERE id = ?`, [id])
+  }
+
+  async markSyncedNote(id: NoteId, syncedAt: number, maxUpdatedAt: number): Promise<void> {
+    const { sqlite3, db } = this.#mustInit()
+    // One conditional statement: the stamp lands only when the stored
+    // revision is the one that was pushed (or older) and not yet stamped.
+    await sqlite3.execWithParams(
+      db,
+      `UPDATE notes SET syncedAt = ?
+       WHERE id = ? AND deletedAt IS NULL AND syncedAt IS NULL AND updatedAt <= ?`,
+      [syncedAt, id, maxUpdatedAt],
+    )
   }
 
   async enqueue(entry: SyncOutboxEntry): Promise<void> {
@@ -116,6 +143,35 @@ export class SQLiteStorage implements NoteStorage {
       queuedAt: Number(row[4]),
     }))
   }
+
+  async deadLetter(entry: SyncOutboxEntry, reason: string): Promise<void> {
+    const { sqlite3, db } = this.#mustInit()
+    await sqlite3.execWithParams(
+      db,
+      `INSERT OR REPLACE INTO dead_letters (id, kind, action, payload, queuedAt, reason, failedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [entry.id, entry.kind, entry.action, JSON.stringify(entry.payload), entry.queuedAt, reason, Date.now()],
+    )
+  }
+
+  async deadLetters(): Promise<DeadLetter[]> {
+    const { sqlite3, db } = this.#mustInit()
+    const { rows } = await sqlite3.execWithParams(
+      db,
+      `SELECT id, kind, action, payload, queuedAt, reason, failedAt FROM dead_letters ORDER BY failedAt DESC`,
+    )
+    return rows.map((row: unknown[]) => ({
+      entry: {
+        id: String(row[0]),
+        kind: row[1] as 'note',
+        action: row[2] as 'create' | 'update' | 'delete',
+        payload: JSON.parse(String(row[3])),
+        queuedAt: Number(row[4]),
+      },
+      reason: String(row[5]),
+      failedAt: Number(row[6]),
+    }))
+  }
 }
 
 const SCHEMA = `
@@ -125,7 +181,8 @@ const SCHEMA = `
     body      TEXT NOT NULL,
     createdAt INTEGER NOT NULL,
     updatedAt INTEGER NOT NULL,
-    syncedAt  INTEGER
+    syncedAt  INTEGER,
+    deletedAt INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_notes_updatedAt ON notes(updatedAt);
   CREATE TABLE IF NOT EXISTS sync_outbox (
@@ -136,15 +193,26 @@ const SCHEMA = `
     queuedAt INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_outbox_queuedAt ON sync_outbox(queuedAt);
+  CREATE TABLE IF NOT EXISTS dead_letters (
+    id       TEXT PRIMARY KEY,
+    kind     TEXT NOT NULL,
+    action   TEXT NOT NULL,
+    payload  TEXT NOT NULL,
+    queuedAt INTEGER NOT NULL,
+    reason   TEXT NOT NULL,
+    failedAt INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_dead_failedAt ON dead_letters(failedAt);
 `
 
 function rowToNote(row: unknown[]): Note {
-  return {
+  return normalizeNote({
     id: String(row[0]),
     title: String(row[1]),
     body: String(row[2]),
     createdAt: Number(row[3]),
     updatedAt: Number(row[4]),
     syncedAt: row[5] === null || row[5] === undefined ? null : Number(row[5]),
-  }
+    deletedAt: row[6] === null || row[6] === undefined ? null : Number(row[6]),
+  })
 }

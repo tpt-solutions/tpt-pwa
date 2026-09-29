@@ -18,9 +18,21 @@ impl std::fmt::Display for ParseError {
     }
 }
 
+/// Deepest expression/statement nesting accepted. The parser, the compiler,
+/// and the AST's recursive `Drop` all walk this structure recursively, so
+/// this bound is what keeps a hostile script (`((((…))))` a million deep)
+/// from overflowing the native stack -- the precondition for the "no
+/// recursion unbounded" clause of the totality contract in lib.rs.
+pub const MAX_NESTING_DEPTH: u32 = 128;
+
+/// Most tokens one script may carry. A cap here bounds lexing and the
+/// parser's token vector no matter how pathological the input.
+pub const MAX_TOKENS: usize = 100_000;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: u32,
 }
 
 /// Parse a complete task script: exactly one `task` definition.
@@ -30,11 +42,43 @@ pub fn parse_task(source: &str) -> Result<Task, ParseError> {
         line: e.line,
         col: e.col,
     })?;
-    let mut parser = Parser { tokens, pos: 0 };
+    if tokens.len() > MAX_TOKENS {
+        return Err(ParseError {
+            message: format!("script exceeds the {} token limit", MAX_TOKENS),
+            line: 1,
+            col: 1,
+        });
+    }
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     parser.parse_task_def()
 }
 
 impl Parser {
+    /// Enter one nesting level; every recursive descent point wraps its body
+    /// with `enter`/`leave` so a hostile script cannot overflow the native
+    /// stack. (An RAII guard would pin the `&mut self` borrow across the
+    /// whole guarded body, so the pair is explicit.)
+    fn enter(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            self.depth -= 1;
+            let token = &self.tokens[self.pos];
+            return Err(ParseError {
+                message: format!("nesting deeper than {MAX_NESTING_DEPTH} levels is rejected"),
+                line: token.line,
+                col: token.col,
+            });
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
     fn peek(&self) -> &Tok {
         &self.tokens[self.pos].tok
     }
@@ -98,6 +142,13 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.enter()?;
+        let result = self.parse_stmt_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, ParseError> {
         match self.peek().clone() {
             Tok::Let => {
                 self.advance();
@@ -135,6 +186,14 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+        self.enter()?;
+        let result = self.parse_if_inner();
+        self.leave();
+        result
+    }
+
+    /// `else if` chains recurse here, hence the depth bound.
+    fn parse_if_inner(&mut self) -> Result<Stmt, ParseError> {
         self.expect(&Tok::If)?;
         let cond = self.parse_expr()?;
         let then_branch = self.parse_block()?;
@@ -158,12 +217,26 @@ impl Parser {
     // ---- expressions (precedence climbing) ----
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        self.enter()?;
+        let result = self.parse_or();
+        self.leave();
+        result
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_or_inner();
+        self.depth = base; // restore even on error paths
+        result
+    }
+
+    fn parse_or_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_and()?;
         while *self.peek() == Tok::Or {
+            // `a || b || c…` nests left-ward one level per iteration: the
+            // increment must PERSIST (no matching leave), or the compiler's
+            // recursion over the AST overflows. The wrapper restores depth.
+            self.enter()?;
             self.advance();
             let rhs = self.parse_and()?;
             lhs = Expr::Binary {
@@ -176,8 +249,16 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_and_inner();
+        self.depth = base;
+        result
+    }
+
+    fn parse_and_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_equality()?;
         while *self.peek() == Tok::And {
+            self.enter()?;
             self.advance();
             let rhs = self.parse_equality()?;
             lhs = Expr::Binary {
@@ -190,6 +271,13 @@ impl Parser {
     }
 
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_equality_inner();
+        self.depth = base;
+        result
+    }
+
+    fn parse_equality_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_comparison()?;
         loop {
             let op = match self.peek() {
@@ -197,6 +285,7 @@ impl Parser {
                 Tok::NotEq => BinOp::NotEq,
                 _ => break,
             };
+            self.enter()?;
             self.advance();
             let rhs = self.parse_comparison()?;
             lhs = Expr::Binary {
@@ -209,6 +298,13 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_comparison_inner();
+        self.depth = base;
+        result
+    }
+
+    fn parse_comparison_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_additive()?;
         loop {
             let op = match self.peek() {
@@ -218,6 +314,7 @@ impl Parser {
                 Tok::GreaterEq => BinOp::GreaterEq,
                 _ => break,
             };
+            self.enter()?;
             self.advance();
             let rhs = self.parse_additive()?;
             lhs = Expr::Binary {
@@ -230,6 +327,13 @@ impl Parser {
     }
 
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_additive_inner();
+        self.depth = base;
+        result
+    }
+
+    fn parse_additive_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_unary()?;
         loop {
             let op = match self.peek() {
@@ -237,6 +341,7 @@ impl Parser {
                 Tok::Minus => BinOp::Sub,
                 _ => break,
             };
+            self.enter()?;
             self.advance();
             let rhs = self.parse_unary()?;
             lhs = Expr::Binary {
@@ -250,9 +355,11 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         if *self.peek() == Tok::Not {
+            self.enter()?;
             self.advance();
-            let inner = self.parse_unary()?;
-            return Ok(Expr::UnaryNot(Box::new(inner)));
+            let inner = self.parse_unary();
+            self.leave();
+            return inner.map(|inner| Expr::UnaryNot(Box::new(inner)));
         }
         self.parse_postfix()
     }
@@ -405,5 +512,72 @@ mod tests {
             other => panic!("expected call statement, got {other:?}"),
         }
         assert_eq!(Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(1)));
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    #[test]
+    fn deeply_nested_parens_are_rejected_not_a_stack_overflow() {
+        let mut source = String::from("task t() -> void { return ");
+        source.push_str(&"(".repeat(10_000));
+        source.push('1');
+        source.push_str(&")".repeat(10_000));
+        source.push_str("; }");
+        let err = parse_task(&source).expect_err("must reject runaway nesting");
+        assert!(err.message.contains("nesting deeper"), "got: {err}");
+    }
+
+    #[test]
+    fn deeply_nested_blocks_are_rejected() {
+        let mut source = String::from("task t() -> void { ");
+        for _ in 0..10_000 {
+            source.push_str("if true { ");
+        }
+        source.push_str(&"} ".repeat(10_000));
+        source.push('}');
+        let err = parse_task(&source).expect_err("must reject runaway blocks");
+        assert!(err.message.contains("nesting deeper"), "got: {err}");
+    }
+
+    #[test]
+    fn long_unary_not_chains_are_rejected() {
+        let source = format!("task t() -> void {{ return {}true; }}", "!".repeat(10_000));
+        let err = parse_task(&source).expect_err("must reject runaway not-chains");
+        assert!(err.message.contains("nesting deeper"), "got: {err}");
+    }
+
+    #[test]
+    fn else_if_chains_are_bounded() {
+        let mut source = String::from("task t() -> void { ");
+        for _ in 0..10_000 {
+            source.push_str("if false { } else ");
+        }
+        source.push_str("{ } }");
+        let err = parse_task(&source).expect_err("must reject runaway else-if chains");
+        assert!(err.message.contains("nesting deeper"), "got: {err}");
+    }
+
+    #[test]
+    fn absurd_token_counts_are_capped() {
+        // One enormous identifier list: bounded by MAX_TOKENS, not memory.
+        let mut source = String::from("task t() -> void { return 1");
+        source.push_str(&" + 1".repeat(MAX_TOKENS)); // way past the cap
+        source.push_str("; }");
+        let err = parse_task(&source).expect_err("must reject token floods");
+        assert!(err.message.contains("token limit"), "got: {err}");
+    }
+
+    #[test]
+    fn nesting_just_under_the_limit_still_parses() {
+        // 100 levels of parens sit comfortably inside MAX_NESTING_DEPTH.
+        let mut source = String::from("task t() -> void { return ");
+        source.push_str(&"(".repeat(100));
+        source.push('1');
+        source.push_str(&")".repeat(100));
+        source.push_str("; }");
+        assert!(parse_task(&source).is_ok(), "legitimate nesting must work");
     }
 }

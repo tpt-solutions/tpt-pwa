@@ -175,5 +175,11 @@ class CortexBridge(
         private const val NORMAL_CLOSE = 1000
         private const val RECONNECT_MS = 5_000L
         const val DEFAULT_URL = "ws://127.0.0.1:9911/rpc"
+
+        /** "ws://127.0.0.1:9911/rpc" -> "127.0.0.1:9911" (the Mobile.start addr). */
+        fun hostOf(url: String): String = url
+            .removePrefix("wss://")
+            .removePrefix("ws://")
+            .substringBefore('/')
     }
 }

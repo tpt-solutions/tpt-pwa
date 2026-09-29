@@ -38,3 +38,6 @@ export const daemonTasks = writable<TaskSummary | null>(null)
 
 /** Result of the most recent outbox flush (null = none this session). */
 export const lastFlush = writable<FlushOutcome | null>(null)
+
+/** A new service worker is waiting; the UI offers "reload to update". */
+export const swUpdateReady = writable(false)

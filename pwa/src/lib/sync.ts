@@ -20,7 +20,13 @@ export type FlushOutcome = {
   pending: number
 }
 
-export const DEFAULT_SYNC_ENDPOINT = 'https://api.tpt/sync'
+/**
+ * There is no managed sync service behind this repo, so the direct-HTTP
+ * fallback ships DISABLED: `null` endpoint means "hand-off to the daemon or
+ * stay queued". Deployments that run a sync endpoint pass its URL via
+ * `SyncDeps.endpoint` (and ideally a same-origin path, given CORS).
+ */
+export const DEFAULT_SYNC_ENDPOINT: string | null = null
 
 export interface SyncDeps {
   storage: NoteStorage
@@ -29,7 +35,13 @@ export interface SyncDeps {
   fetchFn?: typeof fetch
   /** Receives `online` events; injectable so tests can use a bare EventTarget. */
   onlineTarget?: EventTarget | null
-  endpoint?: string
+  /** Direct-HTTP fallback endpoint; `null` (the default) disables that path. */
+  endpoint?: string | null
+}
+
+/** HTTP statuses that mean "this entry will NEVER succeed -- stop retrying". */
+function isPermanentFailure(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429
 }
 
 /**
@@ -39,15 +51,22 @@ export interface SyncDeps {
  * drains the outbox via the best available path and is idempotent + safe to
  * call repeatedly: entries are only removed after a confirmed hand-off, so a
  * crash or offline flush merely leaves them queued for the next attempt.
+ *
+ * Hand-off idempotency: outbox entry ids are deterministic
+ * (`noteId:action`), so re-enqueueing after a crash replaces instead of
+ * duplicating, and each daemon hand-off carries a `batchId` the server side
+ * can dedupe on. Outbox ordering uses a monotonic counter (never a bare
+ * `Date.now()`, which can stall or jump backwards under NTP/domain changes).
  */
 export class SyncManager {
   readonly #storage: NoteStorage
   #transport: SyncTransport | null
   readonly #fetchFn: typeof fetch
-  readonly #endpoint: string
+  readonly #endpoint: string | null
   readonly #onlineTarget: EventTarget | null
   #chain: Promise<FlushOutcome> = Promise.resolve({ via: 'none', synced: 0, failed: 0, pending: 0 })
   #started = false
+  #lastQueuedAt = 0
 
   constructor(deps: SyncDeps) {
     this.#storage = deps.storage
@@ -78,12 +97,14 @@ export class SyncManager {
     void this.flush().catch((error) => warnDev('sync', error))
   }
 
-  /** Durably queue one note mutation. `delete` carries only the id. */
-  async queueNote(note: Note, action: SyncOutboxAction): Promise<void> {
+  /** Durably queue one note mutation. `delete` carries the tombstone time. */
+  async queueNote(note: Note, action: SyncOutboxAction, deletedAt?: number): Promise<void> {
+    const queuedAt = Math.max(Date.now(), this.#lastQueuedAt + 1)
+    this.#lastQueuedAt = queuedAt
     const entry: SyncOutboxEntry =
       action === 'delete'
-        ? { id: `${note.id}:delete`, kind: 'note', action: 'delete', payload: { id: note.id }, queuedAt: Date.now() }
-        : { id: `${note.id}:${action}`, kind: 'note', action, payload: note, queuedAt: Date.now() }
+        ? { id: `${note.id}:delete`, kind: 'note', action: 'delete', payload: { id: note.id, deletedAt: deletedAt ?? note.updatedAt }, queuedAt }
+        : { id: `${note.id}:${action}`, kind: 'note', action, payload: note, queuedAt }
     await this.#storage.enqueue(entry)
   }
 
@@ -108,12 +129,21 @@ export class SyncManager {
     if (this.#transport?.available) {
       try {
         await this.#transport.enqueueSyncTask(entries)
-        await Promise.all(entries.map((entry) => this.#storage.dequeue(entry.id)))
+        for (const entry of entries) {
+          // One at a time: a failed dequeue must not abandon its siblings.
+          await this.#storage.dequeue(entry.id)
+        }
         return { via: 'cortex', synced: entries.length, failed: 0, pending: 0 }
       } catch (error) {
         // Daemon accepted the connection but dropped mid-handoff: degrade.
         warnDev('sync', error)
       }
+    }
+
+    // No direct-HTTP endpoint configured: stay queued for the daemon (or a
+    // future configured endpoint) rather than POSTing into the void.
+    if (!this.#endpoint) {
+      return { via: 'none', synced: 0, failed: 0, pending: entries.length }
     }
 
     // Path B (spec §4): vanilla browser -- push directly while online; on
@@ -127,6 +157,13 @@ export class SyncManager {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ action: entry.action, note: entry.payload }),
         })
+        if (isPermanentFailure(response.status)) {
+          // Dead-letter: retrying a 400-class rejection can never succeed.
+          await this.#storage.deadLetter(entry, `sync endpoint returned HTTP ${response.status}`)
+          await this.#storage.dequeue(entry.id)
+          failed++
+          continue
+        }
         if (!response.ok) throw new Error(`sync endpoint returned HTTP ${response.status}`)
         await this.#storage.dequeue(entry.id)
         synced++
@@ -144,19 +181,15 @@ export class SyncManager {
   }
 
   /**
-   * Stamp `syncedAt` on the stored note -- never rewrite its content. The
-   * queued payload may be stale (the user may have edited the note after this
-   * entry was enqueued; a newer entry then sits behind it in the outbox), so
-   * copying `entry.payload` back into storage could clobber newer local
-   * edits. We only stamp when storage holds a revision this entry actually
-   * synced (same or older `updatedAt`); a newer stored revision is left for
-   * its own outbox entry to stamp.
+   * Stamp `syncedAt` on the stored note via one conditional storage
+   * operation -- never rewrite its content. The queued payload may be stale
+   * (the user may have edited the note after this entry was enqueued; a
+   * newer entry then sits behind it in the outbox), so `markSyncedNote`
+   * only stamps when storage still holds a revision this entry actually
+   * synced; a newer stored revision is left for its own outbox entry.
    */
   async #markSynced(entry: SyncOutboxEntry): Promise<void> {
     if (entry.action === 'delete' || !('title' in entry.payload)) return
-    const stored = await this.#storage.getNote(entry.payload.id)
-    if (!stored || stored.updatedAt > entry.payload.updatedAt) return
-    if (stored.syncedAt !== null) return
-    await this.#storage.upsertNote({ ...stored, syncedAt: Date.now() })
+    await this.#storage.markSyncedNote(entry.payload.id, Date.now(), entry.payload.updatedAt)
   }
 }

@@ -1,9 +1,10 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { get } from 'svelte/store'
-import { checkCortexConnection, cortexRPC, CortexSyncTransport } from './cortex-client'
+import { checkCortexConnection, cortexRPC, CortexSyncTransport, cortexWSURL, setCortexAuthToken } from './cortex-client'
 import { NoteDoc } from './crdt'
+import { loadCrdtSnapshot, persistCrdtSnapshot } from './crdt-store'
 import { warnDev } from './devlog'
-import { createStorage } from './storage'
+import { createStorageWithLeaderElection } from './storage'
 import type { Note, NoteId, NoteStorage } from './storage'
 import { SyncManager } from './sync'
 import { summarizeTasks } from './telemetry'
@@ -25,13 +26,23 @@ export function initApp(): Promise<void> {
 
 async function doInit(): Promise<void> {
   try {
-    storage = await createStorage()
+    // Web Locks leader election (where available): one tab owns storage
+    // decisions (backend choice, migration); others open the same database
+    // in follower mode instead of silently picking a different one.
+    storage = await createStorageWithLeaderElection()
     capabilities.update((c) => ({ ...c, storageBackend: storage!.backend }))
 
     await refreshNotes()
 
     // CRDT mirror is best-effort: absence only disables multi-device merge, never the app.
-    crdtDoc = await NoteDoc.open()
+    const snapshot = await loadCrdtSnapshot()
+    crdtDoc = await NoteDoc.open(snapshot ?? undefined)
+    if (crdtDoc && !snapshot) {
+      // First run: seed the mirror from durable storage so a later merge
+      // starts from what the user already has.
+      for (const note of await storage.listNotes()) crdtDoc.upsertNote(note)
+      await persistCrdt()
+    }
     capabilities.update((c) => ({ ...c, crdt: crdtDoc !== null }))
 
     sync = new SyncManager({ storage, onlineTarget: typeof window !== 'undefined' ? window : null })
@@ -45,13 +56,35 @@ async function doInit(): Promise<void> {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') void flushSync()
       })
-      online.set(navigator.onLine)
+      // The tab is going away (reload, close, background eviction): debounced
+      // edits must land in durable storage NOW or they die with the page.
+      window.addEventListener('pagehide', () => flushPendingSaves())
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushPendingSaves()
+      })
       // Companion-host relay (cortex-android): the Android service forwards
       // daemon notifications and link state into this WebView as DOM events,
       // covering windows where the PWA's own WebSocket is between reconnects.
       window.addEventListener('cortex:notification', (event) => {
         const method = (event as CustomEvent<{ method?: string }>).detail?.method
         if (method === 'cortex.event.taskCompleted') void flushSync()
+      })
+      // The companion's embedded daemon requires a shared /rpc token; it is
+      // delivered here and appended to every connect attempt from now on.
+      window.addEventListener('cortex:auth', (event) => {
+        const token = (event as CustomEvent<{ token?: string }>).detail?.token
+        if (typeof token === 'string' && token !== '') {
+          setCortexAuthToken(token)
+          if (!cortexRPC.connected) void checkCortexConnection().then((connected) => {
+            capabilities.update((c) => ({ ...c, cortex: connected }))
+            if (connected) {
+              cortexRPC.enableAutoReconnect()
+              void refreshTelemetry()
+              sync?.setTransport(new CortexSyncTransport())
+              void flushSync()
+            }
+          })
+        }
       })
       window.addEventListener('cortex:state', (event) => {
         const state = (event as CustomEvent<{ state?: string }>).detail?.state
@@ -74,6 +107,9 @@ async function doInit(): Promise<void> {
     const cortexConnected = await checkCortexConnection()
     capabilities.update((c) => ({ ...c, cortex: cortexConnected }))
     if (cortexConnected) {
+      // The daemon was really there once: keep the link alive across its
+      // restarts instead of degrading until the next full app boot.
+      cortexRPC.enableAutoReconnect()
       void refreshTelemetry()
       if (sync) sync.setTransport(new CortexSyncTransport())
     }
@@ -95,21 +131,32 @@ export async function refreshNotes(): Promise<void> {
 
 /**
  * Optimistic note creation (spec §4 scenario): the note appears instantly,
- * then persistence + outbox enqueue happen in the background. If the durable
- * write fails, the optimistic insert is rolled back and the error rethrown.
+ * then persistence + outbox enqueue happen in the background. On failure the
+ * optimistic insert is rolled back AND the partial durable write is undone,
+ * leaving no half-created note behind when the user retries.
  */
 export async function createNote(title = '', body = ''): Promise<Note> {
   if (!storage) throw new Error('app not initialised')
   const now = Date.now()
-  const note: Note = { id: crypto.randomUUID(), title, body, createdAt: now, updatedAt: now, syncedAt: null }
+  const note: Note = { id: crypto.randomUUID(), title, body, createdAt: now, updatedAt: now, syncedAt: null, deletedAt: null }
   notes.update((list) => [note, ...list])
+  let stored = false
   try {
     await storage.upsertNote(note)
+    stored = true
     await sync?.queueNote(note, 'create')
     crdtDoc?.upsertNote(note)
+    await persistCrdt()
     await bumpPending()
   } catch (error) {
     notes.update((list) => list.filter((n) => n.id !== note.id))
+    if (stored) {
+      try {
+        await storage.deleteNote(note.id)
+      } catch (undoError) {
+        warnDev('app', undoError)
+      }
+    }
     throw error
   }
   return note
@@ -121,39 +168,75 @@ export function updateNote(id: NoteId, patch: Partial<Pick<Note, 'title' | 'body
   if (!store) return
   const snapshot = get(notes).find((n) => n.id === id)
   if (!snapshot) return
-  notes.update((list) => list.map((n) => (n.id === id ? { ...n, ...patch, updatedAt: Date.now() } : n)))
+  // Monotonic local revision: a device clock that jumps backwards (NTP,
+  // travel) must not make an edit look older than the note it edits.
+  const updatedAt = Math.max(Date.now(), snapshot.updatedAt + 1)
+  notes.update((list) => list.map((n) => (n.id === id ? { ...n, ...patch, updatedAt } : n)))
 
   clearTimeout(saveTimers.get(id))
   saveTimers.set(
     id,
-    setTimeout(async () => {
+    setTimeout(() => {
       saveTimers.delete(id)
-      const note = get(notes).find((n) => n.id === id)
-      if (!note) return
-      try {
-        await store.upsertNote(note)
-        await sync?.queueNote(note, 'update')
-        crdtDoc?.upsertNote(note)
-        await bumpPending()
-      } catch (error) {
-        warnDev('app', error)
+      void persistNote(id).catch(() => {
+        // Durable write failed: restore the pre-edit revision the storage
+        // layer actually still holds, so UI and disk agree.
         notes.update((list) => list.map((n) => (n.id === id ? snapshot : n)))
-      }
+      })
     }, SAVE_DEBOUNCE_MS),
   )
 }
 
-/** Optimistic delete; rolled back (re-inserted, re-sorted) if the durable delete fails. */
+/** The durable write behind `updateNote`: storage + outbox + CRDT mirror. */
+async function persistNote(id: NoteId): Promise<void> {
+  const store = storage
+  if (!store) return
+  const note = get(notes).find((n) => n.id === id)
+  if (!note || note.deletedAt !== null) return
+  await store.upsertNote(note)
+  await sync?.queueNote(note, 'update')
+  crdtDoc?.upsertNote(note)
+  await persistCrdt()
+  await bumpPending()
+}
+
+/**
+ * Persist every pending debounced edit immediately (pagehide / tab hidden).
+ * Resolves when all pending writes settle; event listeners fire-and-forget.
+ */
+export function flushPendingSaves(): Promise<unknown> {
+  const writes: Promise<unknown>[] = []
+  for (const id of [...saveTimers.keys()]) {
+    clearTimeout(saveTimers.get(id))
+    saveTimers.delete(id)
+    writes.push(persistNote(id).catch((error) => warnDev('app', error)))
+  }
+  return Promise.all(writes)
+}
+
+/**
+ * Optimistic delete. The note is tombstoned (not hard-removed) so the delete
+ * survives as data: it syncs to other devices, wins LWW against concurrent
+ * edits, and the CRDT mirror converges on the deletion. Rolled back (and the
+ * tombstone undone) if the durable write fails.
+ */
 export async function deleteNote(id: NoteId): Promise<void> {
   if (!storage) return
   const snapshot = get(notes)
   const removed = snapshot.find((n) => n.id === id)
   if (!removed) return
+  // A debounced edit for this note must not fire after the delete.
+  clearTimeout(saveTimers.get(id))
+  saveTimers.delete(id)
+
+  const deletedAt = Math.max(Date.now(), removed.updatedAt + 1)
+  const tombstone: Note = { ...removed, deletedAt, updatedAt: deletedAt }
   notes.update((list) => list.filter((n) => n.id !== id))
   try {
-    await storage.deleteNote(id)
-    await sync?.queueNote(removed, 'delete')
-    crdtDoc?.removeNote(id)
+    await storage.upsertNote(tombstone)
+    await sync?.queueNote(removed, 'delete', deletedAt)
+    crdtDoc?.removeNote(id, deletedAt)
+    await persistCrdt()
     await bumpPending()
   } catch (error) {
     warnDev('app', error)
@@ -197,3 +280,23 @@ async function bumpPending(): Promise<void> {
   if (!storage) return
   pendingSync.set((await storage.pendingQueue()).length)
 }
+
+/** Save the CRDT mirror's binary; best-effort, never blocks a mutation. */
+async function persistCrdt(): Promise<void> {
+  if (!crdtDoc) return
+  await persistCrdtSnapshot(crdtDoc.save())
+}
+
+/** Test seam: rebind the module's negotiated storage (app.test.ts drives createNote/updateNote through it). */
+export function __setAppStorageForTests(replacement: NoteStorage): void {
+  storage = replacement
+  sync = new SyncManager({ storage: replacement })
+}
+
+/** Test seam: rebind the CRDT mirror. */
+export function __setCrdtDocForTests(doc: NoteDoc | null): void {
+  crdtDoc = doc
+}
+
+/** Test seam: run the durable write behind a debounced edit now. */
+export const __persistNoteForTests = persistNote

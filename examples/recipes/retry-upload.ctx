@@ -1,0 +1,17 @@
+// Recipe: retry-upload
+// Push every pending row, but only while the network is up. Rows that fail
+// once stay pending (the daemon's scheduler re-runs the task with backoff);
+// a 4xx-rejected push is a runtime error, which the daemon classifies as
+// transient and retries -- park permanently-rejected rows upstream instead.
+//
+// Test: examples/recipes/recipes_test.rs
+task retryUpload() -> void {
+    if !native.net.isConnected() {
+        return;
+    }
+    let pending = native.db.query("SELECT id, body FROM uploads WHERE status = 'pending'");
+    for row in pending {
+        native.http.post("https://api.example.com/uploads", row);
+        native.db.exec("UPDATE uploads SET status = 'uploaded' WHERE id = ?", row.id);
+    }
+}

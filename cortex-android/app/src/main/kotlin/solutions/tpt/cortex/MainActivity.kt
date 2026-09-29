@@ -40,12 +40,29 @@ class MainActivity : AppCompatActivity() {
             webView.evaluateJavascript(script, null)
         }
     }
+    // The embedded daemon requires a shared token on /rpc; the PWA inside the
+    // WebView needs it for its own direct WebSocket, so it arrives as a
+    // cortex:auth DOM event (and again after every page load, since page
+    // loads reset the page's JS state).
+    @Volatile private var lastDaemonToken: String? = null
+    private val authRelay: (String) -> Unit = { token ->
+        lastDaemonToken = token
+        dispatchAuth(token)
+    }
+
+    private fun dispatchAuth(token: String) {
+        runOnUiThread {
+            val script = "window.dispatchEvent(new CustomEvent('cortex:auth',{detail:{token:'$token'}}));"
+            webView.evaluateJavascript(script, null)
+        }
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             daemon = binder as? DaemonService.LocalBinder
             daemon?.addNotificationListener(notificationRelay)
             daemon?.addStateListener(stateRelay)
+            daemon?.addAuthListener(authRelay)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -70,6 +87,13 @@ class MainActivity : AppCompatActivity() {
         } else {
             webView.loadUrl(DEFAULT_PWA_URL)
         }
+        // Re-hand the daemon token whenever the page (re)loads: page loads
+        // reset the PWA's JS state, losing the earlier cortex:auth event.
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                lastDaemonToken?.let { dispatchAuth(it) }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -90,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         daemon?.removeNotificationListener(notificationRelay)
         daemon?.removeStateListener(stateRelay)
+        daemon?.removeAuthListener(authRelay)
         unbindService(serviceConnection)
         super.onDestroy()
     }
