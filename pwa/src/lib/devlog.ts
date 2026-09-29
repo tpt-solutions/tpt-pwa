@@ -11,3 +11,5 @@ export function warnDev(scope: string, error: unknown): void {
     console.warn(`[tpt-pwa:${scope}]`, error)
   }
 }
+
+// CI probe: pwa-only change to verify the path-filter fix (safe to revert).
