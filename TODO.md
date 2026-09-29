@@ -86,7 +86,7 @@ Findings from a second full review (PWA, daemon, engine, adoption). Found by rea
 ### Tier 1 — CI/tooling bugs
 
 - [x] Fix CI PR path filters — `ci.yml` used `pull_request.changed_files` (an integer count), so PR jobs never ran; replaced with a `changes` job using `dorny/paths-filter`, and the PWA job now runs `pnpm run test`
-- [ ] Verify the CI fix with a throwaway PR touching only `pwa/` (pwa job runs, others skip) — **needs GitHub**: no `gh` CLI/push available from the machine that applied the fix
+- [ ] Verify the CI fix with a throwaway PR touching only `pwa/` (pwa job runs, others skip) — **needs GitHub UI**: push a `pwa/`-only branch and open the PR (no `gh` CLI on this machine)
 - [x] Make `cortex-shell/scripts/prepare-sidecar.mjs` fail loudly instead of writing a 0-byte sidecar; have CI run it — exits non-zero with build instructions (escape hatch: `CORTEX_SIDECAR_ALLOW_PLACEHOLDER=1`); the CI shell job now builds a real sidecar before `pnpm install` (which runs the script)
 - [x] Sign the release APK and build the gomobile `.aar` in `release.yml` — gomobile bind step (NDK auto-detected), env-driven signing config wired in `app/build.gradle.kts` via `APK_KEYSTORE_BASE64`/`APK_KEYSTORE_PASSWORD`/`APK_KEY_ALIAS`/`APK_KEY_PASSWORD` secrets (unsigned fallback preserved), fixed artifact names, idempotent release create/upload
 - [x] Check `cortex-android/app/proguard-rules.pro` keeps the reflectively loaded `Mobile` class — it kept `cortex.**` but gomobile generates `solutions.tpt.cortex.Mobile`; rules now keep that class plus gomobile's `go.**` JNI runtime
@@ -108,6 +108,12 @@ Findings from a second full review (PWA, daemon, engine, adoption). Found by rea
 - [x] HTTP sync path — permanent 4xx (except 408/429) dead-letters the entry (`dead_letters` table/store + inspection API); the placeholder `https://api.tpt/sync` default is gone: with no endpoint configured the HTTP path is disabled and entries wait for the daemon
 - [x] Smaller PWA fixes — `newNote`/`removeCurrent` no longer produce unhandled rejections, `appinstalled` clears the install prompt, a failed automerge load no longer memoizes `null` permanently (retryable), `crdt.merge` frees the peer doc on every path (try/finally), `updateNote` revisions are monotonic under backwards clock jumps
 - [x] PWA test gaps — new `app.test.ts` (create/rollback/coalescing/pagehide/tombstone/clock), `cortex-client.test.ts` (memoized connect, pending rejection, backoff reconnect, transport ack validation), storage `markSyncedNote`/dead-letter tests, `generate-sw.test.ts` (content hashing, sw.js exclusion, update flow), CRDT tombstone merge roundtrip (multi-tab coordination is covered by the Web Locks leader design rather than a simulated second tab)
+
+### Tier 3 quick wins (pulled from the menu below)
+
+- [x] Register Background Sync (`tpt-sync` was never registered, so the SW handler was dead code) — `background-sync.ts` (`requestBackgroundSync`), armed after every flush that leaves entries queued; no-op where unsupported
+- [x] `navigator.storage.persist()` requested at bootstrap (durability hint; denial logged in dev)
+- [x] Daemon: task `cortex.task.cancel` / `cortex.task.retry` / `cortex.task.prune` API (queue methods + contract doc; lifecycle tested), plus `GET /health` and `GET /metrics` (Prometheus text) on the same loopback server
 
 ### Tier 1 — Daemon (Go) bugs
 
@@ -134,24 +140,24 @@ Findings from a second full review (PWA, daemon, engine, adoption). Found by rea
 ### Tier 2 — Adoption
 
 - [x] Release binaries — `release-binaries.yml`: daemon + engine for linux/macos/windows × amd64/arm64, per-target `SHA256SUMS-<target>.txt`, `--generate-notes`, and a tests-first gate
-- [x] One-line installers — `scripts/install.sh` + `scripts/install.ps1` (checksum-verified, PATH guidance); winget/scoop/Homebrew manifests still open
+- [x] One-line installers — `scripts/install.sh` + `scripts/install.ps1` (checksum-verified, PATH guidance); winget/scoop/Homebrew manifests in `packaging/` (publish flow documented there — bucket/tap repos and the winget-pkgs PR are external)
 - [x] `cortex doctor` — `cortex-daemon doctor` subcommand (port, origin, auth token, queue health, data-dir writability, engine spawn, sync endpoint reachability, version; `--json` for tooling), documented in the README quickstart
 - [x] Devcontainer plus `mise.toml`/`.tool-versions` (Node 22, pnpm 11, Go 1.25, Rust 1.85); Dockerfile for the daemon (distroless, flag-driven, token-first docs)
 - [x] Examples runnable with one command — `examples/local-sync/run.sh` / `run.ps1` (build → mock endpoint → engine-backed daemon → enqueue → teardown, verified end-to-end on Windows); no hardcoded `.exe` paths anywhere
 - [x] `create-tpt-pwa` starter — `tools/create-tpt-pwa` (`pnpm scaffold:app -- --name my-app --template notes|todo|chat`): self-contained Vite+Svelte+TS app with the tested degradation layer copied verbatim, SW generator, and CI prewired
-- [ ] Register scaffolded Go/Rust companions in CI (auto-discover `tools/create-tpt-companion` output in the daemon/engine jobs)
+- [x] Register scaffolded Go/Rust companions in CI — convention: `pnpm scaffold -- --dir companions`; dynamic-matrix `discover-companions` → `companion-go`/`companion-rust` jobs vet+test each
 - [x] `.ctx` recipe cookbook — `examples/recipes/` (retry-upload, periodic-fetch, batch-sync), each exercised by `cortex-engine/tests/recipes.rs` (parse+compile+run, connectivity-gating asserted)
 - [x] `SECURITY.md` — trust boundaries, loopback/token rules, `fs` sandbox, engine budget, reporting process
 - [x] Architecture diagram (Mermaid) in the README
 - [x] `.ctx` language reference — [docs/language-reference.md](docs/language-reference.md)
 - [x] Troubleshooting/FAQ — [docs/troubleshooting.md](docs/troubleshooting.md) (port 9911, Android cleartext-loopback WebView, Windows firewall, corrupt queues, dead-letters)
 - [x] CHANGELOG, `CODE_OF_CONDUCT.md`, issue/PR templates, `CODEOWNERS`; expand `cortex-shell/README.md` and `docs/jsonrpc-contract.md` (batchId/dedup, accepted count, token, push envelope, sandbox notes). `CONTRIBUTING.md` expansion is still open
-- [x] CI: Dependabot, CodeQL (JS+Go), `govulncheck`, `cargo audit`, `pnpm audit`, version-sync check (`scripts/check-version-sync.mjs`) — still open: Windows/macOS CI matrix, Go/Gradle cache tuning, coverage reporting, provenance attestations
+- [x] CI: Dependabot, CodeQL (JS+Go), `govulncheck`, `cargo audit`, `pnpm audit`, version-sync check (`scripts/check-version-sync.mjs`); Windows/macOS CI matrix (daemon on win, engine on all three); coverage reporting (vitest v8 coverage in CI, `go test -cover`); SLSA provenance attestations on release binaries (`gh attestation verify`). Still open: Gradle cache tuning beyond setup-gradle defaults
 
 ### Tier 3 — Features and ideas (menu, unprioritized)
 
-- [ ] Product gaps: search, export/import (JSON/Markdown), `navigator.storage.persist()`, encryption at rest and in sync, multi-tab coordination, register Background Sync (`tpt-sync` is never registered, so the SW handler is dead code), a11y (live regions, aria-labels, reduced motion), i18n
-- [ ] Daemon: task cancel/retry/prune API, `/health` and `/metrics`, structured logging, config file, TLS
+- [ ] Product gaps: search, export/import (JSON/Markdown), `navigator.storage.persist()` (DONE), encryption at rest and in sync, multi-tab coordination, register Background Sync (DONE), a11y (live regions, aria-labels, reduced motion), i18n
+- [x] Daemon: task cancel/retry/prune API, `/health` and `/metrics` — DONE (see Tier 3 quick wins). Still open: structured logging, config file, TLS
 - [ ] Engine language: `null` literal, assignment, `* / %`, unary minus, lists/maps, functions, `while`; a real `db.query` (today it ignores the SQL) and `db.exec` (a no-op)
 - [ ] `.ctx` playground in the PWA (Rust VM compiled to WASM, same bytecode as the daemon)
 - [ ] Capability-manifest recipes: scripts declare the natives they use (net/fs/db) and the daemon asks for consent

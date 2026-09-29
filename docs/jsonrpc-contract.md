@@ -75,6 +75,37 @@ Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <
 // params: none; result: { "tasks": [ …same objects as status… ] }
 ```
 
+### `cortex.task.cancel` — park a queued task
+
+```jsonc
+// params: { "taskId": "53c281e98e29be47" }
+// result: the task object, now state "failed" with lastError "cancelled"
+```
+
+Only **queued** tasks can be cancelled; running tasks refuse (`-32602`) because the executor's result decides their terminal state.
+
+### `cortex.task.retry` — requeue a failed task
+
+```jsonc
+// params: { "taskId": "53c281e98e29be47" }
+// result: the task object, back to state "queued" with attempts reset to 0
+```
+
+### `cortex.task.prune` — drop finished tasks
+
+```jsonc
+// params: none (or null); result: { "pruned": 3 }
+```
+
+Removes every `completed`/`failed` task from the queue file; pending work is never touched.
+
+## Plain HTTP endpoints (same loopback server, not JSON-RPC)
+
+- `GET /health` — liveness: `{"status":"ok","version":"…","queue":{queued,running,completed,failed}}`.
+- `GET /metrics` — Prometheus text format: `cortex_queue_tasks{state}`, `cortex_tasks_total{kind=enqueued|completed|failed}`, `cortex_uptime_seconds`.
+
+Both are read-only and inherit the daemon's loopback binding; they are not gated by `-auth-token`.
+
 ### `fs.write` — native file save (spec §6 example)
 
 ```jsonc

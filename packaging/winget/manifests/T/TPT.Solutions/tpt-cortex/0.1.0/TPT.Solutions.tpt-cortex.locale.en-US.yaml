@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: TPT.Solutions.tpt-cortex
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: TPT Solutions
+PackageName: tpt-cortex
+License: MIT OR Apache-2.0
+ShortDescription: Local native companion for the tpt-pwa framework (daemon + .ctx engine)
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

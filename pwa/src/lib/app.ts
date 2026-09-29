@@ -1,6 +1,7 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { get } from 'svelte/store'
 import { checkCortexConnection, cortexRPC, CortexSyncTransport, cortexWSURL, setCortexAuthToken } from './cortex-client'
+import { requestBackgroundSync } from './background-sync'
 import { NoteDoc } from './crdt'
 import { loadCrdtSnapshot, persistCrdtSnapshot } from './crdt-store'
 import { warnDev } from './devlog'
@@ -31,6 +32,15 @@ async function doInit(): Promise<void> {
     // in follower mode instead of silently picking a different one.
     storage = await createStorageWithLeaderElection()
     capabilities.update((c) => ({ ...c, storageBackend: storage!.backend }))
+    // Ask for durable storage while we're at it: without persistence the
+    // browser may evict OPFS/IndexedDB under pressure, defeating the whole
+    // offline-first point. Best-effort -- denial only degrades durability.
+    try {
+      const persisted = await navigator.storage?.persist?.()
+      if (persisted === false) warnDev('app', 'storage persistence denied: offline data may be evicted under pressure')
+    } catch (error) {
+      warnDev('app', error)
+    }
 
     await refreshNotes()
 
@@ -253,6 +263,10 @@ export async function flushSync(): Promise<void> {
     pendingSync.set(outcome.pending)
     lastFlush.set(outcome)
     if (outcome.synced > 0) await refreshNotes()
+    // Entries left queued (offline flush, no daemon yet): re-arm Background
+    // Sync so the OS wakes the worker when connectivity returns, even if
+    // this tab is gone by then.
+    if (outcome.pending > 0) void requestBackgroundSync()
   } catch (error) {
     // Flush is best-effort; entries stay queued for the next trigger.
     warnDev('sync', error)

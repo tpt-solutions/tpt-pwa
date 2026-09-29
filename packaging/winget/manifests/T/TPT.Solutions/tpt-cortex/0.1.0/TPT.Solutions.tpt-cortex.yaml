@@ -1,0 +1,38 @@
+# winget package manifest (submitted to microsoft/winget-pkgs per release).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: TPT.Solutions.tpt-cortex
+PackageVersion: 0.1.0
+PackageName: tpt-cortex
+Publisher: TPT Solutions
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/tpt-solutions/tpt-pwa/blob/master/LICENSE-MIT
+ShortDescription: Local native companion for the tpt-pwa framework (daemon + .ctx engine)
+PackageUrl: https://github.com/tpt-solutions/tpt-pwa
+Moniker: tpt-cortex
+Tags:
+  - offline-first
+  - pwa
+  - sync
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/tpt-solutions/tpt-pwa/releases/download/v0.1.0/tpt-cortex-windows-amd64.zip
+    InstallerSha256: PLACEHOLDER-SET-PER-RELEASE
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: cortex-daemon.exe
+        PortableCommandAlias: cortex-daemon
+      - RelativeFilePath: cortex-engine.exe
+        PortableCommandAlias: cortex-engine
+  - Architecture: arm64
+    InstallerType: zip
+    InstallerUrl: https://github.com/tpt-solutions/tpt-pwa/releases/download/v0.1.0/tpt-cortex-windows-arm64.zip
+    InstallerSha256: PLACEHOLDER-SET-PER-RELEASE
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: cortex-daemon.exe
+        PortableCommandAlias: cortex-daemon
+      - RelativeFilePath: cortex-engine.exe
+        PortableCommandAlias: cortex-engine
+ManifestType: singleton
+ManifestVersion: 1.6.0

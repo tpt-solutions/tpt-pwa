@@ -79,6 +79,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	broker := rpc.NewBroker()
+	stats := newTaskStats()
 	sched := &scheduler.Scheduler{
 		Queue:       taskQueue,
 		Executor:    buildExecutor(ctx, cfg),
@@ -86,6 +87,7 @@ func Run(ctx context.Context, cfg Config) error {
 		PollEvery:   cfg.PollEvery,
 		MaxAttempts: cfg.MaxAttempts,
 		OnTransition: func(taskID string, state queue.State) {
+			stats.count(state)
 			switch state {
 			case queue.StateCompleted, queue.StateFailed:
 				broker.Broadcast("cortex.event.taskCompleted", map[string]any{"taskId": taskID, "state": string(state)})
@@ -100,7 +102,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// NewHandler builds the HTTP surface (exported for tests and embedders).
 	mux := http.NewServeMux()
-	mux.Handle("/rpc", NewHandler(ctx, cfg, taskQueue, broker))
+	mux.Handle("/rpc", NewHandler(ctx, cfg, taskQueue, broker, stats))
+	mux.Handle("/health", healthHandler(taskQueue))
+	mux.Handle("/metrics", metricsHandler(taskQueue, stats, time.Now))
 
 	server := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -109,7 +113,7 @@ func Run(ctx context.Context, cfg Config) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	log.Printf("listening on ws://%s/rpc", cfg.Addr)
+	log.Printf("listening on ws://%s/rpc (health: /health, metrics: /metrics)", cfg.Addr)
 	serveErr := server.ListenAndServe()
 	// Graceful shutdown: the HTTP server has drained (or hit its 5s grace)
 	// and the scheduler has stopped touching the queue before we return --
@@ -123,10 +127,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 // NewHandler returns the /rpc WebSocket endpoint: loopback origins allowed,
 // optional shared-token auth (query `token` or X-Cortex-Token header), and a
-// bounded read limit.
-func NewHandler(ctx context.Context, cfg Config, taskQueue *queue.Queue, broker *rpc.Broker) http.Handler {
+// bounded read limit. stats (optional) collects /metrics counters.
+func NewHandler(ctx context.Context, cfg Config, taskQueue *queue.Queue, broker *rpc.Broker, stats *taskStats) http.Handler {
+	if stats == nil {
+		stats = newTaskStats()
+	}
 	dispatch := func(ctx context.Context, request rpc.Request) (any, *rpc.RPCError) {
-		handler, ok := handlers(cfg.DataDir, taskQueue)[request.Method]
+		handler, ok := handlers(cfg.DataDir, taskQueue, stats)[request.Method]
 		if !ok {
 			return nil, &rpc.RPCError{Code: rpc.CodeMethodNotFound, Message: "method not found: " + request.Method}
 		}
@@ -192,12 +199,18 @@ func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
 	return engine
 }
 
-func handlers(dataDir string, taskQueue *queue.Queue) rpc.Handlers {
+func handlers(dataDir string, taskQueue *queue.Queue, stats *taskStats) rpc.Handlers {
+	if stats == nil {
+		stats = newTaskStats()
+	}
 	return rpc.Handlers{
 		"cortex.ping":         pingHandler(),
-		"cortex.task.enqueue": taskEnqueueHandler(taskQueue),
+		"cortex.task.enqueue": taskEnqueueHandler(taskQueue, stats),
 		"cortex.task.status":  taskStatusHandler(taskQueue),
 		"cortex.task.list":    taskListHandler(taskQueue),
+		"cortex.task.cancel":  taskCancelHandler(taskQueue),
+		"cortex.task.retry":   taskRetryHandler(taskQueue),
+		"cortex.task.prune":   taskPruneHandler(taskQueue),
 		"fs.write":            fsWriteHandler(dataDir),
 	}
 }
@@ -216,7 +229,10 @@ type enqueueParams struct {
 	RunAt   *time.Time        `json:"runAt,omitempty"`
 }
 
-func taskEnqueueHandler(taskQueue *queue.Queue) rpc.Handler {
+func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
+	if stats == nil {
+		stats = newTaskStats()
+	}
 	return func(_ context.Context, raw json.RawMessage) (any, error) {
 		var p enqueueParams
 		if err := rpc.ParseParams(raw, &p); err != nil {
@@ -249,6 +265,9 @@ func taskEnqueueHandler(taskQueue *queue.Queue) rpc.Handler {
 		task, deduplicated, err := taskQueue.EnqueueIdempotent(p.Kind, p.BatchID, body, runAt)
 		if err != nil {
 			return nil, err
+		}
+		if !deduplicated {
+			stats.enqueued.Add(1)
 		}
 		return map[string]any{"taskId": task.ID, "state": string(task.State), "accepted": p.countEntries(), "deduplicated": deduplicated}, nil
 	}
@@ -288,6 +307,61 @@ func taskListHandler(taskQueue *queue.Queue) rpc.Handler {
 			out[i] = taskToJSON(task)
 		}
 		return map[string]any{"tasks": out}, nil
+	}
+}
+
+// taskCancelHandler parks a queued task as failed ("cancelled") without
+// waiting for its executor turn. Running tasks refuse: their result decides.
+func taskCancelHandler(taskQueue *queue.Queue) rpc.Handler {
+	type params struct {
+		TaskID string `json:"taskId"`
+	}
+	return func(_ context.Context, raw json.RawMessage) (any, error) {
+		var p params
+		if err := rpc.ParseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		task, err := taskQueue.Cancel(p.TaskID)
+		if err != nil {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: err.Error()}
+		}
+		return taskToJSON(task), nil
+	}
+}
+
+// taskRetryHandler requeues a failed task with a fresh attempt budget.
+func taskRetryHandler(taskQueue *queue.Queue) rpc.Handler {
+	type params struct {
+		TaskID string `json:"taskId"`
+	}
+	return func(_ context.Context, raw json.RawMessage) (any, error) {
+		var p params
+		if err := rpc.ParseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		task, err := taskQueue.Retry(p.TaskID)
+		if err != nil {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: err.Error()}
+		}
+		return taskToJSON(task), nil
+	}
+}
+
+// taskPruneHandler drops every finished task (completed/failed) and reports
+// how many went. Pending work is never touched.
+func taskPruneHandler(taskQueue *queue.Queue) rpc.Handler {
+	return func(_ context.Context, raw json.RawMessage) (any, error) {
+		// Absent params and explicit `null` are both "no params"; anything
+		// else is a client bug worth surfacing.
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" && trimmed != "null" {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "prune takes no params"}
+		}
+		pruned, err := taskQueue.PruneFinished()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"pruned": pruned}, nil
 	}
 }
 

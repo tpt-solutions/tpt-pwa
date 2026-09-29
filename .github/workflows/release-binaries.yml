@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write      # SLSA provenance attestation signing
+  attestations: write
 
 jobs:
   binaries:
@@ -84,6 +86,15 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "tpt-cortex $GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" --clobber "$ARCHIVE" "${{ env.DIST }}/SHA256SUMS-${{ matrix.name }}.txt"
+
+      # SLSA provenance for the binaries: verifiable with
+      #   gh attestation verify <file> -R tpt-solutions/tpt-pwa
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ env.DIST }}/cortex-daemon*
+            ${{ env.DIST }}/cortex-engine*
 
   notes:
     name: Attach install instructions

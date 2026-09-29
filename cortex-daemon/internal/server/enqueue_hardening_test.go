@@ -16,7 +16,7 @@ func rpcCall(t *testing.T, method string, params any) (any, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handlers(t.TempDir(), mustQueue(t))[method](context.Background(), encoded)
+	return handlers(t.TempDir(), mustQueue(t), nil)[method](context.Background(), encoded)
 }
 
 // Unknown kinds are rejected at enqueue time, not after retries.
@@ -53,11 +53,11 @@ func TestEnqueueIdempotencyKeyDeduplicatesBatches(t *testing.T) {
 		"batchId": "sync-abc123",
 		"entries": []any{map[string]string{"id": "n1:create"}},
 	})
-	first, err := taskEnqueueHandler(taskQueue)(context.Background(), encoded)
+	first, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
 	if err != nil {
 		t.Fatalf("first submission: %v", err)
 	}
-	second, err := taskEnqueueHandler(taskQueue)(context.Background(), encoded)
+	second, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
 	if err != nil {
 		t.Fatalf("retry submission: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestEnqueueIdempotencyKeyDeduplicatesBatches(t *testing.T) {
 // outside must not become an escape hatch, and writes land atomically.
 func TestFSWriteResolvesSymlinksAndWritesAtomically(t *testing.T) {
 	dir := t.TempDir()
-	write := handlers(dir, mustQueue(t))["fs.write"]
+	write := handlers(dir, mustQueue(t), nil)["fs.write"]
 
 	// Escape via a symlinked subdirectory.
 	outside := t.TempDir()

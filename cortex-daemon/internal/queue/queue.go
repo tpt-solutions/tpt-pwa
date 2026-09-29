@@ -232,6 +232,82 @@ func (q *Queue) SetRunAt(id string, runAt time.Time) error {
 	return q.saveLocked()
 }
 
+// Cancel parks a QUEUED task as failed with a "cancelled" marker. Running
+// tasks cannot be cancelled from here (the executor is mid-flight; its
+// result decides the terminal state).
+func (q *Queue) Cancel(id string) (Task, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	t, ok := q.byID[id]
+	if !ok {
+		return Task{}, fmt.Errorf("queue: unknown task %s", id)
+	}
+	if t.State != StateQueued {
+		return Task{}, fmt.Errorf("queue: task %s is %s; only queued tasks can be cancelled", id, t.State)
+	}
+	prev := *t
+	t.State = StateFailed
+	t.LastError = "cancelled"
+	t.UpdatedAt = time.Now().UTC()
+	if err := q.saveLocked(); err != nil {
+		*t = prev
+		return Task{}, err
+	}
+	return *t, nil
+}
+
+// Retry requeues a failed task with its attempt budget restored.
+func (q *Queue) Retry(id string) (Task, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	t, ok := q.byID[id]
+	if !ok {
+		return Task{}, fmt.Errorf("queue: unknown task %s", id)
+	}
+	if t.State != StateFailed {
+		return Task{}, fmt.Errorf("queue: task %s is %s; only failed tasks can be retried", id, t.State)
+	}
+	prev := *t
+	t.State = StateQueued
+	t.Attempts = 0
+	t.LastError = ""
+	t.RunAt = time.Now().UTC()
+	t.UpdatedAt = time.Now().UTC()
+	if err := q.saveLocked(); err != nil {
+		*t = prev
+		return Task{}, err
+	}
+	return *t, nil
+}
+
+// PruneFinished drops every completed/failed task and returns how many were
+// removed. Pending work is never touched.
+func (q *Queue) PruneFinished() (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	kept := make([]*Task, 0, len(q.tasks))
+	pruned := 0
+	for _, t := range q.tasks {
+		if t.State == StateCompleted || t.State == StateFailed {
+			pruned++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if pruned == 0 {
+		return 0, nil
+	}
+	q.tasks = kept
+	q.byID = make(map[string]*Task, len(kept))
+	for _, t := range kept {
+		q.byID[t.ID] = t
+	}
+	if err := q.saveLocked(); err != nil {
+		return 0, err
+	}
+	return pruned, nil
+}
+
 // pruneLocked drops the oldest finished tasks beyond maxFinishedTasks.
 // Caller holds mu. Finished tasks are kept for inspection only; pruning them
 // does not lose pending work.

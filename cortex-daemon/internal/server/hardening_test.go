@@ -24,7 +24,7 @@ func testServer(t *testing.T, cfg Config) *httptest.Server {
 		cfg.DataDir = t.TempDir()
 	}
 	taskQueue := mustQueue(t)
-	server := httptest.NewServer(NewHandler(context.Background(), cfg, taskQueue, rpc.NewBroker()))
+	server := httptest.NewServer(NewHandler(context.Background(), cfg, taskQueue, rpc.NewBroker(), nil))
 	t.Cleanup(server.Close)
 	return server
 }
@@ -90,7 +90,7 @@ func TestAuthTokenDisabledByDefault(t *testing.T) {
 
 func TestFSWriteRejectsOversizedPayloads(t *testing.T) {
 	dir := t.TempDir()
-	write := handlers(dir, mustQueue(t))["fs.write"]
+	write := handlers(dir, mustQueue(t), nil)["fs.write"]
 	if write == nil {
 		t.Fatal("fs.write handler missing")
 	}

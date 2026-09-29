@@ -18,6 +18,7 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       shell: ${{ steps.filter.outputs.shell }}
       android: ${{ steps.filter.outputs.android }}
+      companions: ${{ steps.filter.outputs.companions }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -44,6 +45,10 @@ jobs:
             android:
               - 'cortex-android/**'
               - '.github/workflows/ci.yml'
+            companions:
+              - 'companions/**'
+              - 'tools/create-tpt-companion/**'
+              - '.github/workflows/ci.yml'
 
   pwa:
     name: PWA (Svelte/TS)
@@ -61,14 +66,20 @@ jobs:
         working-directory: pwa
       - run: pnpm run check
         working-directory: pwa
-      - run: pnpm run test
+      - run: pnpm run test:coverage
         working-directory: pwa
       - run: pnpm run build
         working-directory: pwa
 
   cortex-daemon:
-    name: Cortex Daemon (Go)
-    runs-on: ubuntu-latest
+    name: Cortex Daemon (Go) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The daemon touches real filesystems (fs.write sandbox, queue
+        # durability): Windows path semantics deserve their own lane.
+        os: [ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: cortex-daemon
@@ -81,11 +92,17 @@ jobs:
           go-version: "1.25"
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      - run: go test -cover ./...
 
   cortex-engine:
-    name: Cortex Engine (Rust)
-    runs-on: ubuntu-latest
+    name: Cortex Engine (Rust) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Parser depth guards and stack behaviour differ per OS: exercise the
+        # adversarial suite on all three toolchain hosts.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     defaults:
       run:
         working-directory: cortex-engine
@@ -100,7 +117,9 @@ jobs:
         with:
           workspaces: cortex-engine
       - run: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest' # formatting is host-independent
       - run: cargo clippy -- -D warnings
+        if: matrix.os == 'ubuntu-latest'
       - run: cargo test
 
   cortex-shell:
@@ -152,3 +171,65 @@ jobs:
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew assembleDebug testDebugUnitTest
+  discover-companions:
+    name: Discover scaffolded companions
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.companions == 'true'
+    outputs:
+      go: ${{ steps.scan.outputs.go }}
+      rust: ${{ steps.scan.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        run: |
+          # Convention: `pnpm scaffold -- --dir companions` puts companions here.
+          go_list='[]'
+          rust_list='[]'
+          if [ -d companions ]; then
+            go_list=$(find companions -mindepth 2 -maxdepth 2 -name go.mod | cut -d/ -f2 | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            rust_list=$(find companions -mindepth 2 -maxdepth 2 -name Cargo.toml | cut -d/ -f2 | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          echo "go=$go_list" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust_list" >> "$GITHUB_OUTPUT"
+
+  companion-go:
+    name: Companion (Go) — ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: [changes, discover-companions]
+    if: needs.changes.outputs.companions == 'true' && needs.discover-companions.outputs.go != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.discover-companions.outputs.go) }}
+    defaults:
+      run:
+        working-directory: companions/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+  companion-rust:
+    name: Companion (Rust) — ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: [changes, discover-companions]
+    if: needs.changes.outputs.companions == 'true' && needs.discover-companions.outputs.rust != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.discover-companions.outputs.rust) }}
+    defaults:
+      run:
+        working-directory: companions/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: companions/${{ matrix.name }}
+      - run: cargo test

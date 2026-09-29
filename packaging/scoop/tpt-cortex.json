@@ -1,0 +1,31 @@
+{
+    "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+    "_comment": "Scoop manifest for tpt-cortex. Users install from this bucket: scoop bucket add tpt https://github.com/tpt-solutions/scoop-bucket && scoop install tpt-cortex. Version/urls are updated per release (the release workflow can bump this file, or the bucket repo mirrors it).",
+    "version": "0.1.0",
+    "license": "MIT OR Apache-2.0",
+    "homepage": "https://github.com/tpt-solutions/tpt-pwa",
+    "description": "tpt-cortex: the local native companion for the tpt-pwa framework (cortex-daemon + cortex-engine).",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/tpt-solutions/tpt-pwa/releases/download/v0.1.0/tpt-cortex-windows-amd64.zip",
+            "hash": "PLACEHOLDER-SET-PER-RELEASE-FROM-SHA256SUMS-windows-amd64.txt",
+            "extract_dir": ""
+        },
+        "arm64": {
+            "url": "https://github.com/tpt-solutions/tpt-pwa/releases/download/v0.1.0/tpt-cortex-windows-arm64.zip",
+            "hash": "PLACEHOLDER-SET-PER-RELEASE-FROM-SHA256SUMS-windows-arm64.txt"
+        }
+    },
+    "bin": ["cortex-daemon.exe", "cortex-engine.exe"],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/tpt-solutions/tpt-pwa/releases/download/v$version/tpt-cortex-windows-amd64.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/tpt-solutions/tpt-pwa/releases/download/v$version/tpt-cortex-windows-arm64.zip"
+            }
+        }
+    }
+}
