@@ -156,6 +156,10 @@ jobs:
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           go build -o "bin/cortex-daemon-${TRIPLE}" ./cmd/cortex-daemon
       - run: pnpm install --frozen-lockfile
+      # tauri::generate_context! validates frontendDist at compile time, so
+      # the PWA bundle must exist before cargo check.
+      - name: Build the PWA (frontendDist for tauri)
+        run: pnpm --filter tpt-pwa build
       # Cargo.toml lives in the src-tauri subpackage, not in cortex-shell/.
       - run: cargo check
         working-directory: cortex-shell/src-tauri
