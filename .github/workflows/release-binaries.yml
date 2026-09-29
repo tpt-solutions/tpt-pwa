@@ -33,7 +33,7 @@ jobs:
     env:
       DIST: dist/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: binaries
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Ensure the release notes point at the installers
         env:
           GH_TOKEN: ${{ github.token }}
