@@ -20,6 +20,8 @@ All notable changes to tpt-pwa are documented here. The format follows
   and a Dockerfile for the daemon.
 - CI: CodeQL, Dependabot, `govulncheck`, `cargo audit`, `pnpm audit`, and a
   manifest version-sync check.
+- The PR template redirects contributors to the issue tracker: this repo
+  accepts issues only.
 - CI shakeout (found by the first real workflow runs): pnpm pinned via
   `packageManager`, workspace-scoped installs, direct-execution guard for
   the SW generator, `gradlew` exec bit, shell job builds the PWA and runs
