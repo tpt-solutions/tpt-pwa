@@ -15,5 +15,6 @@
     "hooks:setup": "git config core.hooksPath scripts/githooks",
     "scaffold": "node tools/create-tpt-companion/index.mjs",
     "scaffold:app": "node tools/create-tpt-pwa/index.mjs"
-  }
+  },
+  "packageManager": "pnpm@11.5.1"
 }
