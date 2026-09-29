@@ -20,6 +20,10 @@ All notable changes to tpt-pwa are documented here. The format follows
   and a Dockerfile for the daemon.
 - CI: CodeQL, Dependabot, `govulncheck`, `cargo audit`, `pnpm audit`, and a
   manifest version-sync check.
+- CI shakeout (found by the first real workflow runs): pnpm pinned via
+  `packageManager`, workspace-scoped installs, direct-execution guard for
+  the SW generator, `gradlew` exec bit, shell job builds the PWA and runs
+  cargo check in `src-tauri/`.
 
 ### Changed
 - Service-worker updates no longer `skipWaiting()` mid-session: a waiting
