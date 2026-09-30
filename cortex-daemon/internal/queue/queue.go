@@ -10,7 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -81,7 +81,7 @@ func Open(path string) (*Queue, error) {
 		if moveErr := os.Rename(path, aside); moveErr != nil {
 			return nil, fmt.Errorf("queue: corrupt %s and could not move it aside: %w", path, err)
 		}
-		log.Printf("queue: corrupt queue file moved to %s; starting fresh", aside)
+		slog.Warn("corrupt queue file moved aside; starting fresh", "component", "queue", "aside", aside)
 		return q, nil
 	}
 	// Tasks caught mid-flight by a crash go back to the queue.

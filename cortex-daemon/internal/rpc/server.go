@@ -10,7 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -84,7 +84,7 @@ func (b *Broker) keepalive() {
 			state.writeMu.Unlock()
 			cancel()
 			if err != nil {
-				log.Printf("rpc: keepalive ping to %p failed: %v", conn, err)
+				slog.Warn("keepalive ping failed", "component", "rpc", "conn", fmt.Sprintf("%p", conn), "error", err)
 				conn.Close(websocket.StatusGoingAway, "keepalive timeout")
 			}
 		}
@@ -123,7 +123,7 @@ func (b *Broker) Broadcast(method string, params any) {
 		state.writeMu.Unlock()
 		cancel()
 		if err != nil {
-			log.Printf("rpc: broadcast to %p failed: %v", conn, err)
+			slog.Warn("broadcast failed", "component", "rpc", "conn", fmt.Sprintf("%p", conn), "error", err)
 		}
 	}
 }
@@ -186,11 +186,11 @@ func (b *Broker) write(ctx context.Context, conn *websocket.Conn, payload []byte
 func (b *Broker) writeResult(ctx context.Context, conn *websocket.Conn, id RequestID, result any) {
 	response, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	if err != nil {
-		log.Printf("rpc: encode response: %v", err)
+		slog.Error("encode response failed", "component", "rpc", "error", err)
 		return
 	}
 	if err := b.write(ctx, conn, response); err != nil {
-		log.Printf("rpc: write response: %v", err)
+		slog.Warn("write response failed", "component", "rpc", "error", err)
 	}
 }
 
@@ -204,11 +204,11 @@ func (b *Broker) writeError(ctx context.Context, conn *websocket.Conn, id *Reque
 		"error":   map[string]any{"code": rpcErr.Code, "message": rpcErr.Message},
 	})
 	if err != nil {
-		log.Printf("rpc: encode error response: %v", err)
+		slog.Error("encode error response failed", "component", "rpc", "error", err)
 		return
 	}
 	if err := b.write(ctx, conn, response); err != nil {
-		log.Printf("rpc: write error response: %v", err)
+		slog.Warn("write error response failed", "component", "rpc", "error", err)
 	}
 }
 

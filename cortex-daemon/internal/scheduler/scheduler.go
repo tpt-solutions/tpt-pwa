@@ -9,7 +9,7 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
@@ -85,10 +85,10 @@ func (s *Scheduler) tick(ctx context.Context) {
 		case errors.As(err, &permanent):
 			// Retrying can never fix it (e.g. the endpoint rejected an entry
 			// with 4xx): park it for inspection right away.
-			log.Printf("scheduler: task %s (%s) failed permanently: %v", task.ID, task.Kind, err)
+			slog.Error("task failed permanently", "component", "scheduler", "task", task.ID, "kind", task.Kind, "error", err)
 			s.transition(task.ID, queue.StateFailed, err.Error(), s.MaxAttempts)
 		default:
-			log.Printf("scheduler: task %s (%s) attempt %d failed: %v", task.ID, task.Kind, task.Attempts+1, err)
+			slog.Warn("task attempt failed", "component", "scheduler", "task", task.ID, "kind", task.Kind, "attempt", task.Attempts+1, "error", err)
 			s.transition(task.ID, queue.StateQueued, err.Error(), s.MaxAttempts)
 		}
 	}
@@ -99,7 +99,7 @@ func (s *Scheduler) transition(taskID string, state queue.State, errMsg string, 
 	// the state the task actually landed in, not the one requested.
 	task, err := s.Queue.Transition(taskID, state, errMsg, maxAttempts, time.Now())
 	if err != nil {
-		log.Printf("scheduler: transition task %s to %s: %v", taskID, state, err)
+		slog.Warn("task transition failed", "component", "scheduler", "task", taskID, "state", string(state), "error", err)
 	} else {
 		state = task.State
 	}

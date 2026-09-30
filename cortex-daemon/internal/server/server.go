@@ -12,7 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/engineexec"
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/logging"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/rpc"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/scheduler"
@@ -60,18 +61,25 @@ type Config struct {
 	// cannot set custom headers) or an X-Cortex-Token header. Empty disables
 	// the check (default: loopback-only trust, as in spec §3).
 	AuthToken string
+	// LogFormat ("text"|"json") and LogLevel ("debug"|"info"|"warn"|"error")
+	// shape the process-wide slog default; "" means text/info (the gomobile
+	// embedder gets readable text without configuring anything).
+	LogFormat string
+	LogLevel  string
 }
 
 // Run blocks until ctx is cancelled or the listener fails.
 func Run(ctx context.Context, cfg Config) error {
-	log.SetFlags(log.LstdFlags | log.LUTC)
+	if err := logging.Configure(cfg.LogFormat, cfg.LogLevel); err != nil {
+		return fmt.Errorf("logging: %w", err)
+	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 8
 	}
 	if cfg.PollEvery <= 0 {
 		cfg.PollEvery = 5 * time.Second
 	}
-	log.Printf("cortex-daemon %s starting", Version)
+	slog.Info("daemon starting", "component", "server", "version", Version)
 
 	taskQueue, err := queue.Open(cfg.QueuePath)
 	if err != nil {
@@ -113,7 +121,7 @@ func Run(ctx context.Context, cfg Config) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	log.Printf("listening on ws://%s/rpc (health: /health, metrics: /metrics)", cfg.Addr)
+	slog.Info("listening", "component", "server", "addr", cfg.Addr, "health", "/health", "metrics", "/metrics")
 	serveErr := server.ListenAndServe()
 	// Graceful shutdown: the HTTP server has drained (or hit its 5s grace)
 	// and the scheduler has stopped touching the queue before we return --
@@ -192,10 +200,10 @@ func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := engine.Probe(probeCtx); err != nil {
-		log.Printf("engine %q unusable (%v); falling back to built-in executor", cfg.EnginePath, err)
+		slog.Warn("engine unusable; falling back to built-in executor", "component", "server", "engine", cfg.EnginePath, "error", err)
 		return builtin
 	}
-	log.Printf("task execution routed through cortex-engine VM: %s", cfg.EnginePath)
+	slog.Info("task execution routed through cortex-engine VM", "component", "server", "engine", cfg.EnginePath)
 	return engine
 }
 

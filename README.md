@@ -85,8 +85,10 @@ With both running, the app's header chip flips to **cortex connected** and notes
 | `-queue` | OS config dir | Persistent task queue file |
 | `-data-dir` | OS config dir | Sandbox root for `fs.write` |
 | `-poll` / `-max-attempts` | `5s` / `8` | Scheduler cadence and retry ceiling |
+| `-log-format` / `-log-level` | `text` / `info` | `json` emits one parseable object per line (levels, `component` attrs) for systemd/Docker scraping |
+| `-config` | _(unset)_ | JSON config file; keys mirror the flags (`{"addr": "127.0.0.1:9911", "log-format": "json", ...}`), every explicit flag overrides it, unknown keys are rejected |
 
-There is no `.env` indirection on purpose: the daemon is flag-driven (see `go run ./cortex-daemon/cmd/cortex-daemon -h`) and the PWA needs no configuration.
+There is no `.env` indirection on purpose: the daemon is flag-driven with an optional JSON config file for persistence (see `go run ./cortex-daemon/cmd/cortex-daemon -h`) and the PWA needs no configuration. If you put `-auth-token` in a config file, protect it like a secret (file permissions, not in a repo).
 
 Before blaming the daemon, run its pre-flight check: `go run ./cortex-daemon/cmd/cortex-daemon doctor` (port, origin, auth, queue, data-dir, engine, sync endpoint; `--json` for tooling). More help: [docs/troubleshooting.md](docs/troubleshooting.md).
 
