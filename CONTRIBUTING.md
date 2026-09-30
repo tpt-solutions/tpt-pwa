@@ -17,18 +17,49 @@ Please search existing issues first to avoid duplicates.
 
 The code is dual-licensed under **MIT OR Apache-2.0** (SPDX: `MIT OR Apache-2.0`), copyright TPT Solutions, so you're free to fork and modify it under either license. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
 
-### Getting a fork green
+### Repo layout — where things live and how each is tested
 
-The repo is a pnpm workspace with three toolchains (Node 22/pnpm 11, Go 1.25, Rust 1.85 — `.tool-versions`/`mise.toml` pin them; the devcontainer sets them up for you). From the root:
+| Path | What it is | Checks |
+| --- | --- | --- |
+| `pwa/` | Svelte + TS frontend (Vite), service worker generator, storage/sync/CRDT layers | `pnpm --filter tpt-pwa check` (svelte-check + tsc), `pnpm --filter tpt-pwa test` (vitest, `test:coverage` for coverage) |
+| `cortex-daemon/` | Go JSON-RPC daemon, persistent queue, scheduler | `go vet ./...`, `go test ./...`; `gofmt` enforced by the pre-commit hook (`gofmt -l` must be empty) |
+| `cortex-engine/` | Rust `.ctx` bytecode VM | `cargo fmt --check`, `cargo test`, `cargo clippy -- -D warnings` |
+| `cortex-shell/` | Tauri desktop shell (sidecar daemon) | `cargo check` in `src-tauri/` after building the PWA into `dist/` |
+| `cortex-android/` | Android companion service + WebView bridge | `./gradlew` lint/test (JVM unit tests pin the contract URL) |
+| `tools/create-tpt-companion`, `tools/create-tpt-pwa` | Scaffolders | exercised by their own tests; generated Go/Rust output must compile and test green |
+| `scripts/`, `.github/workflows/` | Installers, hooks, version-sync check, CI | `node scripts/check-version-sync.mjs` runs in CI |
+
+CI ([ci.yml](.github/workflows/ci.yml)) is path-filtered: a job only runs when
+its package changed. `pnpm test` from the root runs the three main suites
+(vitest, go test, cargo test) in one shot.
+
+### Running the stack locally
 
 ```sh
-pnpm install && pnpm run hooks:setup   # deps + pre-commit hooks mirroring CI
-pnpm test                              # vitest + go test + cargo test
+pnpm dev                # PWA dev server → http://localhost:5173
+pnpm run dev:daemon     # daemon → ws://127.0.0.1:9911/rpc (flags in the README table)
 ```
 
-Per-area loops live in each package (`pnpm run check` / `go vet ./...` /
-`cargo clippy -- -D warnings`). CI mirrors exactly these plus the
-`cortex-shell` and `cortex-android` jobs.
+- With both running, the app header flips to **cortex connected**. Without the
+  daemon, everything still works offline — that's the design (principle 2 below).
+- `go run ./cmd/cortex-daemon doctor` (from `cortex-daemon/`) diagnoses port,
+  token, queue, engine and sync-endpoint problems; `-json` for tooling.
+- [examples/local-sync](examples/local-sync/run.sh) walks the full chain
+  (daemon → engine VM → mock sync endpoint) with one command and is the
+  fastest way to see the wire protocol live.
+- Android and shell debugging notes live in their READMEs; port-collision,
+  firewall and WebView gotchas are collected in
+  [docs/troubleshooting.md](docs/troubleshooting.md).
+
+### Regression tests first
+
+The convention every fix in this repo followed: **write the failing test or
+minimal repro before the fix**, and land them together. Bugs found by reading
+code get a regression test that fails on the old code; concurrency and
+failure-injection paths get deterministic tests (see `cortex-daemon`
+queue-failure-injection and `cortex-engine` adversarial-safety tests for the
+pattern). A fix without its test doesn't merge — if you're forking, keep the
+same bar.
 
 ### Starting your own companion or app
 
@@ -40,6 +71,20 @@ Per-area loops live in each package (`pnpm run check` / `go vet ./...` /
 - **License headers**: every source file starts with `Copyright <year> TPT Solutions. Dual-licensed MIT OR Apache-2.0.` — the scaffolders emit them; keep them on new files.
 - **Manifest license fields**: `package.json`/`Cargo.toml` carry `"license": "MIT OR Apache-2.0"`; `scripts/check-version-sync.mjs` also enforces one version across all manifests.
 - **Contract changes lead with the doc**: if you touch methods or payloads, update [docs/jsonrpc-contract.md](docs/jsonrpc-contract.md) in the same change — three runtimes (PWA, daemon, Android bridge) read it as their spec.
+
+### Style and commits
+
+- Formatting is mechanical and enforced: `gofmt`, `cargo fmt`, Prettier-free but svelte-check-clean TS/Svelte. Don't mix formatting churn into behavioural commits.
+- One logical change per commit, imperative subject line ("Make the PR template enforce the issues-only policy", not "fixed some stuff"). The subject should be readable as the changelog entry, because for maintainers it becomes one.
+- Every behavioural fix lands with its regression test in the same commit, per the section above.
+- Docs are part of the change, not a follow-up: contract → [docs/jsonrpc-contract.md](docs/jsonrpc-contract.md), behaviour → [CHANGELOG.md](CHANGELOG.md) `Unreleased`, task state → [TODO.md](TODO.md).
+
+### Releases (maintainers)
+
+1. Land remaining `Unreleased` [CHANGELOG.md](CHANGELOG.md) entries, then cut a version section with the date (Keep a Changelog format).
+2. Bump the version **everywhere at once** — `scripts/check-version-sync.mjs` fails CI if any manifest drifts (root + `pwa/` + `cortex-shell/` `package.json`, `tauri.conf.json`, both `Cargo.toml` files, and the Android build config).
+3. Tag `vX.Y.Z` and push. Two workflows fire on the tag: [release.yml](.github/workflows/release.yml) (signed Android APK + companion download page assets) and [release-binaries.yml](.github/workflows/release-binaries.yml) (daemon + engine archives for linux/macos/windows × amd64/arm64, per-target SHA256SUMS, SLSA attestations — verify with `gh attestation verify`).
+4. Packaging manifests (winget/scoop/Homebrew in [packaging/](packaging/README.md)) are updated against the new tag; those repos are external, so it's a PR there, not here.
 
 ## Design principles (for context when filing issues)
 
