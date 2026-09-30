@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/cron"
 )
 
 // State is the lifecycle state of a task.
@@ -46,12 +48,22 @@ type Task struct {
 	// interval without anything re-enqueueing them. Failures follow the
 	// normal retry/backoff/park path; a parked or cancelled recurring task
 	// stops recurring.
-	Every     time.Duration `json:"every,omitempty"`
-	State     State         `json:"state"`
-	Attempts  int           `json:"attempts"`
-	LastError string        `json:"lastError,omitempty"`
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
+	Every time.Duration `json:"every,omitempty"`
+	// Cron, when set (a validated 5-field expression, internal/cron), is
+	// the calendar variant of Every: the requeue fires at the next matching
+	// local-clock minute instead of a fixed interval later. Mutually
+	// exclusive with Every > 0.
+	Cron      string    `json:"cron,omitempty"`
+	State     State     `json:"state"`
+	Attempts  int       `json:"attempts"`
+	LastError string    `json:"lastError,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// IsRecurring reports whether the task re-enqueues itself after success.
+func (t Task) IsRecurring() bool {
+	return t.Every > 0 || t.Cron != ""
 }
 
 // PermanentError wraps a task failure that retrying can never fix (e.g. the
@@ -99,10 +111,13 @@ func Open(path string) (*Queue, error) {
 		switch {
 		case t.State == StateRunning:
 			t.State = StateQueued
-		case t.State == StateCompleted && t.Every > 0:
+		case t.State == StateCompleted && t.IsRecurring():
+			// A recurring task caught in its instant of completion (crash
+			// between the completed transition and the requeue) resumes its
+			// schedule instead of sitting completed forever.
 			t.State = StateQueued
 			t.Attempts = 0
-			t.RunAt = time.Now().UTC().Add(t.Every)
+			t.RunAt = NextRunAt(*t, time.Now().UTC())
 		}
 		q.tasks = append(q.tasks, t)
 		q.byID[t.ID] = t
@@ -110,28 +125,66 @@ func Open(path string) (*Queue, error) {
 	return q, nil
 }
 
+// NextRunAt computes when a recurring task should fire next: a fixed
+// interval later, or the cron expression's next local-clock minute. An
+// unparseable cron expression (possible only for hand-edited queue files)
+// falls back to "due now", where the scheduler's task timeout and the
+// regular retry path handle it like any other failure.
+func NextRunAt(t Task, now time.Time) time.Time {
+	if t.Every > 0 {
+		return now.Add(t.Every)
+	}
+	if schedule, err := cron.Parse(t.Cron); err == nil {
+		if next, err := schedule.Next(now); err == nil {
+			return next
+		}
+	}
+	return now
+}
+
 // Enqueue appends a task and persists the queue.
 func (q *Queue) Enqueue(kind string, body json.RawMessage, runAt time.Time) (*Task, error) {
-	task, _, err := q.EnqueueIdempotent(kind, "", body, runAt, 0)
+	task, _, err := q.EnqueueSpec(Spec{Kind: kind, Body: body, RunAt: runAt})
 	return task, err
 }
 
-// EnqueueIdempotent appends a task unless a queued/running task with the same
+// Spec is one task submission. Every > 0 and Cron are the two recurring
+// forms (mutually exclusive); both make the task requeue itself after each
+// successful completion.
+type Spec struct {
+	Kind           string
+	IdempotencyKey string
+	Body           json.RawMessage
+	RunAt          time.Time
+	Every          time.Duration
+	Cron           string
+}
+
+// EnqueueSpec appends a task unless a queued/running task with the same
 // IdempotencyKey already exists, in which case that task is returned with
-// deduplicated=true (the submission is a retry, not new work). every > 0
-// makes the task recur after each successful completion.
-func (q *Queue) EnqueueIdempotent(kind, idempotencyKey string, body json.RawMessage, runAt time.Time, every time.Duration) (*Task, bool, error) {
+// deduplicated=true (the submission is a retry, not new work). The cron
+// expression is validated here so a bad schedule never enters the queue.
+func (q *Queue) EnqueueSpec(spec Spec) (*Task, bool, error) {
+	if spec.Every > 0 && spec.Cron != "" {
+		return nil, false, fmt.Errorf("queue: every and cron are mutually exclusive")
+	}
+	if spec.Cron != "" {
+		if _, err := cron.Parse(spec.Cron); err != nil {
+			return nil, false, err
+		}
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if idempotencyKey != "" {
+	if spec.IdempotencyKey != "" {
 		for _, existing := range q.tasks {
-			if existing.IdempotencyKey == idempotencyKey && (existing.State == StateQueued || existing.State == StateRunning) {
+			if existing.IdempotencyKey == spec.IdempotencyKey && (existing.State == StateQueued || existing.State == StateRunning) {
 				copy := *existing
 				return &copy, true, nil
 			}
 		}
 	}
 	now := time.Now().UTC()
+	runAt := spec.RunAt
 	if runAt.IsZero() {
 		runAt = now
 	} else {
@@ -139,11 +192,12 @@ func (q *Queue) EnqueueIdempotent(kind, idempotencyKey string, body json.RawMess
 	}
 	task := &Task{
 		ID:             newID(),
-		IdempotencyKey: idempotencyKey,
-		Kind:           kind,
-		Body:           body,
+		IdempotencyKey: spec.IdempotencyKey,
+		Kind:           spec.Kind,
+		Body:           spec.Body,
 		RunAt:          runAt,
-		Every:          every,
+		Every:          spec.Every,
+		Cron:           spec.Cron,
 		State:          StateQueued,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -300,9 +354,9 @@ func (q *Queue) Retry(id string) (Task, error) {
 // Requeue returns a COMPLETED recurring task to the queue with a fresh
 // attempt budget, due at now+every. This is the recurrence step: the
 // scheduler calls it after each successful run of a task with Every > 0.
-func (q *Queue) Requeue(id string, every time.Duration, now time.Time) (Task, error) {
-	if every <= 0 {
-		return Task{}, fmt.Errorf("queue: requeue needs a positive interval, got %s", every)
+func (q *Queue) Requeue(id string, next time.Time, now time.Time) (Task, error) {
+	if next.IsZero() {
+		return Task{}, fmt.Errorf("queue: requeue needs a next fire time")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -317,7 +371,7 @@ func (q *Queue) Requeue(id string, every time.Duration, now time.Time) (Task, er
 	t.State = StateQueued
 	t.Attempts = 0
 	t.LastError = ""
-	t.RunAt = now.UTC().Add(every)
+	t.RunAt = next.UTC()
 	t.UpdatedAt = now.UTC()
 	if err := q.saveLocked(); err != nil {
 		*t = prev
@@ -336,7 +390,7 @@ func (q *Queue) PruneFinished() (int, error) {
 	kept := make([]*Task, 0, len(q.tasks))
 	pruned := 0
 	for _, t := range q.tasks {
-		if (t.State == StateCompleted || t.State == StateFailed) && t.Every <= 0 {
+		if (t.State == StateCompleted || t.State == StateFailed) && !t.IsRecurring() {
 			pruned++
 			continue
 		}
@@ -366,7 +420,7 @@ func (q *Queue) pruneLocked() {
 	for i := len(q.tasks) - 1; i >= 0; i-- {
 		t := q.tasks[i]
 		if state := t.State; state == StateCompleted || state == StateFailed {
-			if t.Every > 0 && state == StateCompleted {
+			if state == StateCompleted && t.IsRecurring() {
 				kept = append(kept, t)
 				continue
 			}

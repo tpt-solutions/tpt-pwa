@@ -43,11 +43,11 @@ func TestEnqueueIdempotentDeduplicatesByKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, dup1, err := q.EnqueueIdempotent("syncNotes", "batch-1", json.RawMessage(`{"entries":[]}`), time.Time{}, 0)
+	first, dup1, err := q.EnqueueSpec(Spec{Kind: "syncNotes", IdempotencyKey: "batch-1", Body: json.RawMessage(`{"entries":[]}`)})
 	if err != nil || dup1 {
 		t.Fatalf("first submission: deduplicated=%v err=%v", dup1, err)
 	}
-	second, dup2, err := q.EnqueueIdempotent("syncNotes", "batch-1", json.RawMessage(`{"entries":[]}`), time.Time{}, 0)
+	second, dup2, err := q.EnqueueSpec(Spec{Kind: "syncNotes", IdempotencyKey: "batch-1", Body: json.RawMessage(`{"entries":[]}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestEnqueueIdempotentDeduplicatesByKey(t *testing.T) {
 	if _, err := q.Transition(first.ID, StateCompleted, "", 8, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	third, dup3, err := q.EnqueueIdempotent("syncNotes", "batch-1", json.RawMessage(`{}`), time.Time{}, 0)
+	third, dup3, err := q.EnqueueSpec(Spec{Kind: "syncNotes", IdempotencyKey: "batch-1", Body: json.RawMessage(`{}`)})
 	if err != nil || dup3 {
 		t.Fatalf("resubmission after completion: deduplicated=%v err=%v", dup3, err)
 	}

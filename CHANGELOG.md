@@ -7,6 +7,14 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Cron-scheduled tasks: `cortex.task.enqueue` accepts `cron` (a full
+  5-field expression — lists, ranges, steps, month/day names, vixie
+  DOM/DOW OR semantics, the daemon's local clock) alongside the existing
+  `every` intervals; the two are mutually exclusive. A stdlib-only parser
+  (`internal/cron`) computes fire times with a bounded search, so
+  impossible schedules error instead of hanging. Same crash recovery,
+  prune immunity, and cancel/permanent-failure stops as interval tasks
+  (docs/jsonrpc-contract.md).
 - Real SQL for task scripts: `native.db.query`/`native.db.exec` execute
   against the daemon's SQLite database (`internal/taskdb`,
   modernc.org/sqlite — pure Go, no cgo; `<data-dir>/cortex.db`, WAL,

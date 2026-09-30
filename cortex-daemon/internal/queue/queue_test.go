@@ -109,7 +109,7 @@ func TestDueRespectsRunAt(t *testing.T) {
 
 func TestRecurringTaskRequeuesAfterCompletion(t *testing.T) {
 	q, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
-	task, _, err := q.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, 50*time.Millisecond)
+	task, _, err := q.EnqueueSpec(Spec{Kind: "syncNotes", Body: json.RawMessage(`{}`), Every: 50 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("enqueue recurring: %v", err)
 	}
@@ -121,7 +121,8 @@ func TestRecurringTaskRequeuesAfterCompletion(t *testing.T) {
 	}
 
 	before := time.Now()
-	requeued, err := q.Requeue(task.ID, task.Every, before)
+	next := before.Add(task.Every)
+	requeued, err := q.Requeue(task.ID, next, before)
 	if err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
@@ -142,19 +143,62 @@ func TestRecurringTaskRequeuesAfterCompletion(t *testing.T) {
 		t.Fatalf("due after the interval, got %d", len(due))
 	}
 
-	// Only completed tasks requeue, and only with a positive interval.
-	if _, err := q.Requeue(task.ID, task.Every, time.Now()); err == nil {
+	// Only completed tasks requeue, and only with a next fire time.
+	if _, err := q.Requeue(task.ID, next, time.Now()); err == nil {
 		t.Fatal("requeuing a queued task must fail")
 	}
-	if _, err := q.Requeue(task.ID, 0, time.Now()); err == nil {
-		t.Fatal("requeue needs a positive interval")
+	if _, err := q.Requeue(task.ID, time.Time{}, time.Now()); err == nil {
+		t.Fatal("requeue needs a next fire time")
+	}
+}
+
+func TestCronRecurringTaskRequeuesOnTheNextMatchingMinute(t *testing.T) {
+	q, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	// Every day at 09:00 local.
+	task, _, err := q.EnqueueSpec(Spec{Kind: "syncNotes", Body: json.RawMessage(`{}`), Cron: "0 9 * * *"})
+	if err != nil {
+		t.Fatalf("enqueue cron task: %v", err)
+	}
+	if _, err := q.Transition(task.ID, StateRunning, "", 8, time.Now()); err != nil {
+		t.Fatalf("to running: %v", err)
+	}
+	if _, err := q.Transition(task.ID, StateCompleted, "", 8, time.Now()); err != nil {
+		t.Fatalf("to completed: %v", err)
+	}
+
+	// The scheduler asks the queue helper for the next fire time.
+	after := time.Date(2026, 10, 7, 10, 30, 0, 0, time.Local)
+	next := NextRunAt(*task, after)
+	if want := time.Date(2026, 10, 8, 9, 0, 0, 0, time.Local); !next.Equal(want) {
+		t.Fatalf("next cron fire = %s, want %s", next, want)
+	}
+
+	requeued, err := q.Requeue(task.ID, next, after)
+	if err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	if requeued.Cron != "0 9 * * *" || requeued.Attempts != 0 {
+		t.Fatalf("cron task must keep its expression and reset attempts: %+v", requeued)
+	}
+	if !requeued.RunAt.Equal(next) {
+		t.Fatalf("runAt = %s, want %s", requeued.RunAt, next)
+	}
+
+	// Pruning must not cancel the schedule.
+	if _, err := q.PruneFinished(); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if got, ok := q.Get(task.ID); !ok {
+		t.Fatal("a cron task must survive pruning")
+	} else if got.State != StateQueued {
+		t.Fatalf("state after prune: %s", got.State)
 	}
 }
 
 func TestPruneSkipsRecurringTasks(t *testing.T) {
 	q, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
 	oneShot, _ := q.Enqueue("syncNotes", nil, time.Time{})
-	recurring, _, _ := q.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, time.Minute)
+	recurring, _, _ := q.EnqueueSpec(Spec{Kind: "syncNotes", Body: json.RawMessage(`{}`), Every: time.Minute})
 	for _, task := range []string{oneShot.ID, recurring.ID} {
 		if _, err := q.Transition(task, StateRunning, "", 8, time.Now()); err != nil {
 			t.Fatalf("to running: %v", err)
@@ -180,7 +224,7 @@ func TestCompletedRecurringTaskRecoversAfterCrash(t *testing.T) {
 	// Crash window: the task completed, the requeue had not happened yet.
 	path := filepath.Join(t.TempDir(), "queue.json")
 	q1, _ := Open(path)
-	task, _, _ := q1.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, time.Minute)
+	task, _, _ := q1.EnqueueSpec(Spec{Kind: "syncNotes", Body: json.RawMessage(`{}`), Every: time.Minute})
 	if _, err := q1.Transition(task.ID, StateRunning, "", 8, time.Now()); err != nil {
 		t.Fatalf("to running: %v", err)
 	}

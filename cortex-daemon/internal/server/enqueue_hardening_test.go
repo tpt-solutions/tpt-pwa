@@ -167,3 +167,55 @@ func TestEnqueueAcceptsAndValidatesEvery(t *testing.T) {
 		}
 	}
 }
+
+func TestEnqueueAcceptsAndValidatesCron(t *testing.T) {
+	taskQueue := mustQueue(t)
+
+	// A valid expression lands on the task and comes back in the JSON form.
+	encoded, _ := json.Marshal(map[string]any{
+		"kind":    "syncNotes",
+		"batchId": "cron-1",
+		"payload": map[string]any{},
+		"cron":    "0 9 * * 1-5",
+	})
+	result, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
+	if err != nil {
+		t.Fatalf("enqueue with cron: %v", err)
+	}
+	task, _ := taskQueue.Get(result.(map[string]any)["taskId"].(string))
+	if task.Cron != "0 9 * * 1-5" {
+		t.Fatalf("cron = %q, want \"0 9 * * 1-5\"", task.Cron)
+	}
+	if got := taskToJSON(task)["cron"]; got != "0 9 * * 1-5" {
+		t.Fatalf("task JSON cron = %v", got)
+	}
+
+	// Garbage expressions are invalid params.
+	for _, bad := range []string{"soon", "60 * * * *", "* * * *", "* * * * * *"} {
+		params, _ := json.Marshal(map[string]any{
+			"kind":    "syncNotes",
+			"batchId": "cron-bad-" + bad,
+			"payload": map[string]any{},
+			"cron":    bad,
+		})
+		_, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), params)
+		rpcErr, ok := err.(*rpc.RPCError)
+		if !ok || rpcErr.Code != rpc.CodeInvalidParams {
+			t.Fatalf("cron %q: want -32602, got %v", bad, err)
+		}
+	}
+
+	// every and cron are two answers to the same question: refuse both.
+	params, _ := json.Marshal(map[string]any{
+		"kind":    "syncNotes",
+		"batchId": "cron-and-every",
+		"payload": map[string]any{},
+		"every":   "5m",
+		"cron":    "0 9 * * *",
+	})
+	_, err = taskEnqueueHandler(taskQueue, nil)(context.Background(), params)
+	rpcErr, ok := err.(*rpc.RPCError)
+	if !ok || rpcErr.Code != rpc.CodeInvalidParams {
+		t.Fatalf("every+cron: want -32602, got %v", err)
+	}
+}

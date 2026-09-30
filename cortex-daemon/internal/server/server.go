@@ -21,6 +21,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/cron"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/engineexec"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/logging"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
@@ -284,8 +285,11 @@ type enqueueParams struct {
 	Entries []json.RawMessage `json:"entries,omitempty"`
 	RunAt   *time.Time        `json:"runAt,omitempty"`
 	// Every makes the task recur on successful completion (Go duration
-	// string, e.g. "5m"). Empty = one-shot.
+	// string, e.g. "5m"). Cron is the calendar variant (a 5-field cron
+	// expression, e.g. "0 9 * * 1-5"); the two are mutually exclusive.
+	// Empty = one-shot.
 	Every string `json:"every,omitempty"`
+	Cron  string `json:"cron,omitempty"`
 }
 
 func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
@@ -329,7 +333,24 @@ func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
 			}
 			every = parsed
 		}
-		task, deduplicated, err := taskQueue.EnqueueIdempotent(p.Kind, p.BatchID, body, runAt, every)
+		// Schedule params are client errors when wrong, so they are
+		// validated here (-32602) rather than mapped from queue-side errors.
+		if p.Every != "" && p.Cron != "" {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "every and cron are mutually exclusive"}
+		}
+		if p.Cron != "" {
+			if _, err := cron.Parse(p.Cron); err != nil {
+				return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: err.Error()}
+			}
+		}
+		task, deduplicated, err := taskQueue.EnqueueSpec(queue.Spec{
+			Kind:           p.Kind,
+			IdempotencyKey: p.BatchID,
+			Body:           body,
+			RunAt:          runAt,
+			Every:          every,
+			Cron:           p.Cron,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -525,6 +546,9 @@ func taskToJSON(task queue.Task) map[string]any {
 	}
 	if task.Every > 0 {
 		out["every"] = task.Every.String()
+	}
+	if task.Cron != "" {
+		out["cron"] = task.Cron
 	}
 	return out
 }

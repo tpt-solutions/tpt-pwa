@@ -83,11 +83,12 @@ func (s *Scheduler) tick(ctx context.Context) {
 		case err == nil:
 			s.transition(task.ID, queue.StateCompleted, "", s.MaxAttempts)
 			// Recurring tasks requeue themselves here: one enqueue, runs
-			// forever on its interval (until cancelled, parked by a
-			// permanent failure, or pruned by an operator — prune skips
-			// recurring work).
-			if task.Every > 0 {
-				if _, err := s.Queue.Requeue(task.ID, task.Every, time.Now()); err != nil {
+			// forever on its interval or cron schedule (until cancelled,
+			// parked by a permanent failure, or pruned by an operator —
+			// prune skips recurring work).
+			if task.IsRecurring() {
+				next := queue.NextRunAt(task, time.Now())
+				if _, err := s.Queue.Requeue(task.ID, next, time.Now()); err != nil {
 					slog.Warn("recurring task requeue failed; schedule stops", "component", "scheduler", "task", task.ID, "error", err)
 				}
 			}

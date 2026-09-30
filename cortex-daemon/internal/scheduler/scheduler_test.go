@@ -157,7 +157,7 @@ func TestRecurringTaskRunsRepeatedlyUntilCancelled(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
 	// One enqueue, 30ms interval: two Ticks separated by the interval must
 	// run it twice with a fresh attempt budget each time.
-	task, _, err := q.EnqueueIdempotent("syncNotes", "", body, time.Time{}, 30*time.Millisecond)
+	task, _, err := q.EnqueueSpec(queue.Spec{Kind: "syncNotes", Body: body, Every: 30 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("enqueue recurring: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestRecurringTaskThatFailsPermanentlyStops(t *testing.T) {
 	permanent := &queue.PermanentError{Err: errors.New("endpoint rejected the batch")}
 	q, exec, s := newFixture(t, []error{permanent})
 	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
-	task, _, err := q.EnqueueIdempotent("syncNotes", "", body, time.Time{}, 10*time.Millisecond)
+	task, _, err := q.EnqueueSpec(queue.Spec{Kind: "syncNotes", Body: body, Every: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("enqueue recurring: %v", err)
 	}
@@ -217,5 +217,42 @@ func TestRecurringTaskThatFailsPermanentlyStops(t *testing.T) {
 	s.Tick(context.Background())
 	if len(exec.tasks) != 1 {
 		t.Fatalf("a parked recurring task must not run again, ran %d times", len(exec.tasks))
+	}
+}
+
+func TestCronTaskRequeuesToTheNextMatchingMinute(t *testing.T) {
+	q, exec, s := newFixture(t, []error{nil, nil})
+	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
+	// Every minute, on the minute.
+	task, _, err := q.EnqueueSpec(queue.Spec{Kind: "syncNotes", Body: body, Cron: "* * * * *"})
+	if err != nil {
+		t.Fatalf("enqueue cron task: %v", err)
+	}
+
+	s.Tick(context.Background()) // run 1 -> completed -> requeued to the next minute
+	if len(exec.tasks) != 1 {
+		t.Fatalf("task ran %d times", len(exec.tasks))
+	}
+	got, _ := q.Get(task.ID)
+	if got.State != queue.StateQueued {
+		t.Fatalf("after run 1 the schedule must requeue, got %s", got.State)
+	}
+	// The requeue time is the next whole minute boundary, strictly in the future.
+	if got.RunAt.Minute() == time.Now().Minute() && got.RunAt.Before(time.Now()) {
+		t.Fatalf("runAt %s is not a future minute boundary", got.RunAt)
+	}
+
+	// Simulate the minute elapsing (deterministically): pull RunAt into the
+	// past and tick again.
+	if err := q.SetRunAt(task.ID, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("set runAt: %v", err)
+	}
+	s.Tick(context.Background()) // run 2 -> requeued to the next minute again
+	if len(exec.tasks) != 2 {
+		t.Fatalf("task ran %d times, want 2", len(exec.tasks))
+	}
+	got, _ = q.Get(task.ID)
+	if got.Cron != "* * * * *" || got.State != queue.StateQueued {
+		t.Fatalf("the schedule must keep recurring with its expression: %+v", got)
 	}
 }
