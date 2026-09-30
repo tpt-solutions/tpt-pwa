@@ -7,6 +7,13 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `.ctx` playground in the PWA: the cortex-engine VM compiled to WebAssembly
+  (`cortex-engine-wasm` crate, wasm-pack artifact committed and
+  CI-checked), reachable from a header button. Scripts run against a
+  deterministic sandbox — configurable fake rows and a connectivity flag;
+  `http.post`/`db.exec` are recorded and displayed, each script's native
+  manifest is shown, and errors carry the CLI's permanent/transient classes.
+  Regenerate the artifact after engine changes with `pnpm run engine:build`.
 - Recurring tasks: `cortex.task.enqueue` accepts `every` (e.g. `"5m"`) and
   the queue requeues each successful completion with a fresh attempt budget.
   Recurrence survives crashes (a completed recurring task resumes on

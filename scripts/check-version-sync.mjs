@@ -12,6 +12,7 @@ const manifests = [
   { path: 'cortex-shell/src-tauri/Cargo.toml', read: () => readFileSync('cortex-shell/src-tauri/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1] },
   { path: 'cortex-android/app/build.gradle.kts', read: () => readFileSync('cortex-android/app/build.gradle.kts', 'utf8').match(/versionName\s*=\s*"([^"]+)"/)?.[1] },
   { path: 'cortex-engine/Cargo.toml', read: () => readFileSync('cortex-engine/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1] },
+  { path: 'cortex-engine-wasm/Cargo.toml', read: () => readFileSync('cortex-engine-wasm/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1] },
 ]
 
 let failed = false

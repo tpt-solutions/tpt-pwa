@@ -18,9 +18,10 @@
   import { exportFilename, exportNotesJson, exportNotesMarkdown, parseNotesJson, parseNotesMarkdown } from './lib/transfer'
   import { warnDev } from './lib/devlog'
   import { applySwUpdate } from './main'
+  import Playground from './lib/Playground.svelte'
   import type { Note } from './lib/storage'
 
-  type View = { name: 'list' } | { name: 'editor'; id: string }
+  type View = { name: 'list' } | { name: 'editor'; id: string } | { name: 'playground' }
 
   let view = $state<View>({ name: 'list' })
   let statusOpen = $state(false)
@@ -196,6 +197,13 @@
           Update ready
         </button>
       {/if}
+      <button
+        class="button button--small button--ghost"
+        title="Try the .ctx task language in the browser — the real engine VM, compiled to WebAssembly"
+        onclick={() => transition(() => { view = { name: 'playground' } })}
+      >
+        .ctx playground
+      </button>
     </div>
   </header>
 
@@ -264,6 +272,8 @@
           </ul>
         {/if}
       </section>
+    {:else if view.name === 'playground'}
+      <Playground />
     {:else if selected}
       <section class="editor">
         <div class="editor-toolbar">

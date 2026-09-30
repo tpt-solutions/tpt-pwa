@@ -22,6 +22,7 @@ tpt-pwa/
 tpt-pwa is a **framework you fork or scaffold from**, not a packaged end-user app. There are no published packages or releases yet.
 
 - **Try it:** follow the Quickstart below. The PWA runs standalone; the daemon is optional.
+- **Try the task language in your browser:** run the PWA and open the **.ctx playground** (header button) — the real cortex-engine VM compiled to WebAssembly, running the same bytecode as the daemon against a deterministic sandbox. The artifact is committed; after changing `cortex-engine/`, regenerate it with `pnpm run engine:build` (Rust + wasm-pack) and commit.
 - **Build your own app:** fork the repo and adapt `pwa/`. It works offline with Service Workers + IndexedDB alone, and gains background processing and hardware access when a companion is connected.
 - **Add a native companion:** `node tools/create-tpt-companion --name cortex-foo --lang go|rust|ts` ([docs](tools/create-tpt-companion/README.md)). Companions speak the [JSON-RPC contract](docs/jsonrpc-contract.md).
 - **Learn by example:** [examples/local-sync](examples/local-sync/README.md) and [examples/multi-device-sync](examples/multi-device-sync/README.md).

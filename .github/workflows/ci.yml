@@ -36,6 +36,7 @@ jobs:
               - '.github/workflows/ci.yml'
             engine:
               - 'cortex-engine/**'
+              - 'cortex-engine-wasm/**'
               - 'cortex-daemon/internal/engineexec/**'
               - '.github/workflows/ci.yml'
             shell:
@@ -118,12 +119,26 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: cortex-engine
+          workspaces: |
+            cortex-engine
+            cortex-engine-wasm
       - run: cargo fmt --check
         if: matrix.os == 'ubuntu-latest' # formatting is host-independent
       - run: cargo clippy -- -D warnings
         if: matrix.os == 'ubuntu-latest'
       - run: cargo test
+      # The PWA's .ctx playground embeds this crate compiled to WebAssembly
+      # (the artifact is committed; `pnpm run engine:build` regenerates it).
+      # Verify it still compiles against the wasm target so a language or VM
+      # change cannot silently break the playground.
+      - run: rustup target add wasm32-unknown-unknown
+        if: matrix.os == 'ubuntu-latest'
+      - run: cargo check --target wasm32-unknown-unknown
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: cortex-engine-wasm
+      - run: cargo test
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: cortex-engine-wasm
 
   cortex-shell:
     name: Cortex Shell (Tauri)
