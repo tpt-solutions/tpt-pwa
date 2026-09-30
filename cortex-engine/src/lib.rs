@@ -45,7 +45,7 @@ pub fn run_source(source: &str, env: &mut dyn NativeEnv) -> Result<value::Value,
 }
 
 /// Every failure mode of the engine, front to back.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum EngineError {
     Parse(ParseError),
     Compile(CompileError),

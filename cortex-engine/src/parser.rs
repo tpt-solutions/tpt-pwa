@@ -2,7 +2,7 @@
 
 //! Recursive-descent parser for a single `task` definition.
 
-use crate::ast::{BinOp, Expr, Lit, Stmt, Task};
+use crate::ast::{BinOp, Expr, Function, Lit, Stmt, Task};
 use crate::lexer::{lex, Tok, Token};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +83,13 @@ impl Parser {
         &self.tokens[self.pos].tok
     }
 
+    /// Look-ahead token (0 = current). Bounded by the Eof sentinel: the
+    /// tokenizer never advances past it, so `pos + offset` clamps safely.
+    fn peek_at(&self, offset: usize) -> &Tok {
+        let index = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[index].tok
+    }
+
     fn advance(&mut self) -> Token {
         let token = self.tokens[self.pos].clone();
         if self.pos < self.tokens.len() - 1 {
@@ -126,9 +133,53 @@ impl Parser {
         self.expect(&Tok::RParen)?;
         self.expect(&Tok::Arrow)?;
         self.expect(&Tok::Void)?;
-        let body = self.parse_block()?;
+        // `fn` definitions live only at the top of the task body: nested
+        // functions would need closures to be meaningful, and the language
+        // has none by design.
+        let mut functions = Vec::new();
+        let mut body = Vec::new();
+        self.expect(&Tok::LBrace)?;
+        while *self.peek() != Tok::RBrace {
+            if *self.peek() == Tok::Fn {
+                functions.push(self.parse_fn()?);
+            } else {
+                body.push(self.parse_stmt()?);
+            }
+        }
+        self.expect(&Tok::RBrace)?;
         self.expect(&Tok::Eof)?;
-        Ok(Task { name, body })
+        Ok(Task {
+            name,
+            functions,
+            body,
+        })
+    }
+
+    fn parse_fn(&mut self) -> Result<Function, ParseError> {
+        self.enter()?;
+        let result = self.parse_fn_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_fn_inner(&mut self) -> Result<Function, ParseError> {
+        self.expect(&Tok::Fn)?;
+        let name = self.expect_ident()?;
+        self.expect(&Tok::LParen)?;
+        let mut params = Vec::new();
+        if *self.peek() != Tok::RParen {
+            loop {
+                params.push(self.expect_ident()?);
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Tok::RParen)?;
+        let body = self.parse_block()?;
+        Ok(Function { name, params, body })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -166,6 +217,23 @@ impl Parser {
                 let iter = self.parse_expr()?;
                 let body = self.parse_block()?;
                 Ok(Stmt::For { var, iter, body })
+            }
+            Tok::While => {
+                self.advance();
+                let cond = self.parse_expr()?;
+                let body = self.parse_block()?;
+                Ok(Stmt::While { cond, body })
+            }
+            // `x = expr;` re-assignment, distinguished from an expression
+            // statement by one token of lookahead (`==` lexes as Eq, so
+            // `x == y;` still parses as a comparison).
+            Tok::Ident(name) if *self.peek_at(1) == Tok::Assign => {
+                let name = name.clone();
+                self.advance();
+                self.advance();
+                let expr = self.parse_expr()?;
+                self.expect(&Tok::Semicolon)?;
+                Ok(Stmt::Assign { name, expr })
             }
             Tok::Return => {
                 self.advance();
@@ -334,11 +402,40 @@ impl Parser {
     }
 
     fn parse_additive_inner(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_unary()?;
+        let mut lhs = self.parse_multiplicative()?;
         loop {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
                 Tok::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.enter()?;
+            self.advance();
+            let rhs = self.parse_multiplicative()?;
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// `*`, `/`, `%` bind tighter than `+`/`-` and looser than unary ops.
+    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
+        let base = self.depth;
+        let result = self.parse_multiplicative_inner();
+        self.depth = base;
+        result
+    }
+
+    fn parse_multiplicative_inner(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_unary()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => BinOp::Mul,
+                Tok::Slash => BinOp::Div,
+                Tok::Percent => BinOp::Rem,
                 _ => break,
             };
             self.enter()?;
@@ -354,12 +451,22 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        if *self.peek() == Tok::Not {
-            self.enter()?;
-            self.advance();
-            let inner = self.parse_unary();
-            self.leave();
-            return inner.map(|inner| Expr::UnaryNot(Box::new(inner)));
+        match self.peek() {
+            Tok::Not => {
+                self.enter()?;
+                self.advance();
+                let inner = self.parse_unary();
+                self.leave();
+                return inner.map(|inner| Expr::UnaryNot(Box::new(inner)));
+            }
+            Tok::Minus => {
+                self.enter()?;
+                self.advance();
+                let inner = self.parse_unary();
+                self.leave();
+                return inner.map(|inner| Expr::UnaryNeg(Box::new(inner)));
+            }
+            _ => {}
         }
         self.parse_postfix()
     }
@@ -428,6 +535,49 @@ impl Parser {
             Tok::False => {
                 self.advance();
                 Ok(Expr::Lit(Lit::Bool(false)))
+            }
+            Tok::Null => {
+                self.advance();
+                Ok(Expr::Lit(Lit::Null))
+            }
+            Tok::LBracket => {
+                self.enter()?;
+                self.advance();
+                let mut items = Vec::new();
+                if *self.peek() != Tok::RBracket {
+                    loop {
+                        items.push(self.parse_expr()?);
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Tok::RBracket)?;
+                self.leave();
+                Ok(Expr::List(items))
+            }
+            Tok::LBrace => {
+                self.enter()?;
+                self.advance();
+                let mut pairs = Vec::new();
+                if *self.peek() != Tok::RBrace {
+                    loop {
+                        let key = self.parse_expr()?;
+                        self.expect(&Tok::Colon)?;
+                        let value = self.parse_expr()?;
+                        pairs.push((key, value));
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Tok::RBrace)?;
+                self.leave();
+                Ok(Expr::Map(pairs))
             }
             Tok::Ident(name) => {
                 self.advance();

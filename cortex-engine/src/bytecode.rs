@@ -23,6 +23,11 @@ pub enum Instr {
     Pop,
     Add,
     Sub,
+    Mul,
+    Div,
+    Rem,
+    /// Numeric negation (checked on integers).
+    Neg,
     Not,
     And,
     Or,
@@ -34,13 +39,26 @@ pub enum Instr {
     GreaterEq,
     /// map key -> value (pops string key, then map)
     MemberGet,
-    /// list -> length
+    /// list -> length (the `for..in` iterator protocol)
     ListLen,
-    /// list index -> element (pops index, then list)
-    ListGet,
+    /// container index -> element. Lists take an int index, maps a string
+    /// key (pops index, then container).
+    IndexGet,
+    /// pop `argc` element values, push `[...]` (last popped is last element)
+    BuildList(u16),
+    /// pop `2 * argc` values as key/value pairs, push `{...}`. Keys must be
+    /// strings at runtime; duplicate keys keep the LAST value (JSON-ish).
+    BuildMap(u16),
     /// pop `argc` args (reversed), push native result
     CallNative {
         native: NativeId,
+        argc: u8,
+    },
+    /// call `functions[index]` with `argc` args (already on the stack):
+    /// pushes a frame, execution continues at the function's start offset.
+    /// Arity is checked at compile time; the VM checks the index and depth.
+    CallFn {
+        index: u16,
         argc: u8,
     },
     /// unconditional jump to instruction index
@@ -49,14 +67,28 @@ pub enum Instr {
     JumpIfFalse(u16),
     /// pop condition; jump if truthy (short-circuit `||`)
     JumpIfTrue(u16),
-    /// halt, returning top of stack (or null on empty stack)
+    /// return from the current function (or halt, when in the main body),
+    /// yielding top of stack (or null on empty stack)
     Return,
 }
 
-/// A compiled task: constant pool + instruction sequence + local count.
+/// One compiled function: flattened start offset in `Program::code`, its
+/// parameter count, and its total local count (params + locals).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionInfo {
+    pub name: String,
+    pub start: u16,
+    pub params: u8,
+    pub locals: u16,
+}
+
+/// A compiled task: constant pool + flattened instruction stream (main body
+/// first, then each function's body) + per-scope local counts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
     pub constants: Vec<Value>,
     pub code: Vec<Instr>,
+    pub functions: Vec<FunctionInfo>,
+    /// locals of the main body; functions carry their own counts.
     pub locals: u16,
 }

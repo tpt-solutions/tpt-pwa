@@ -2,8 +2,9 @@
 
 //! The stack VM. Totality contract: `run` either finishes or returns an
 //! error -- never panics, never blocks, never touches the outside world
-//! except through [`NativeEnv`]. An instruction budget bounds runaway loops
-//! (the DSL has no `while`, but a hostile script could still jump forever).
+//! except through [`NativeEnv`]. An instruction budget bounds runaway loops,
+//! and a call-depth cap bounds recursion (memory stays bounded even for
+//! `fn f() { f(); }`).
 
 use std::fmt;
 use std::rc::Rc;
@@ -15,6 +16,12 @@ use crate::value::Value;
 
 /// Default budget: generous for sync-shaped tasks, finite by construction.
 pub const DEFAULT_INSTRUCTION_BUDGET: u64 = 1_000_000;
+
+/// Deepest function-call stack. Each live frame holds `locals_base` bookkeeping
+/// plus the function's local slots, so this bound is what keeps unbounded
+/// recursion (`fn f() { return f(); }`) a bounded-memory error instead of an
+/// OOM. Same order of magnitude as the parser's nesting cap.
+pub const MAX_CALL_DEPTH: usize = 128;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum VmError {
@@ -35,6 +42,10 @@ pub enum VmError {
     },
     /// Integer arithmetic overflowed i64 -- data-driven, like index errors.
     Overflow,
+    /// Integer division or remainder by zero.
+    DivisionByZero,
+    /// Recursion (or a call chain) deeper than [`MAX_CALL_DEPTH`].
+    CallDepthExhausted,
     Native(String),
     BudgetExhausted,
     BadProgram(&'static str),
@@ -52,6 +63,10 @@ impl fmt::Display for VmError {
                 write!(f, "list index {index} out of range (len {len})")
             }
             VmError::Overflow => write!(f, "integer overflow"),
+            VmError::DivisionByZero => write!(f, "division by zero"),
+            VmError::CallDepthExhausted => {
+                write!(f, "call depth exceeded {MAX_CALL_DEPTH} frames")
+            }
             VmError::Native(message) => write!(f, "native call failed: {message}"),
             VmError::BudgetExhausted => write!(f, "instruction budget exhausted"),
             VmError::BadProgram(reason) => write!(f, "malformed program: {reason}"),
@@ -59,12 +74,26 @@ impl fmt::Display for VmError {
     }
 }
 
+/// One live function call: where to resume in the caller, and where the
+/// callee's local slots start inside the flat locals vector.
+#[derive(Clone, Copy, Debug)]
+struct Frame {
+    return_pc: usize,
+    locals_base: usize,
+    /// Locals owned by the CALLER (to truncate back to on return).
+    caller_locals_len: usize,
+}
+
 pub struct Vm<'env> {
     program: Program,
     env: &'env mut dyn NativeEnv,
     registry: NativeRegistry,
     stack: Vec<Value>,
+    /// Flat locals: the main body owns `[0..main_locals)`, each call frame
+    /// appends the callee's slots. `LoadLocal`/`StoreLocal` index relative
+    /// to the current frame's base.
     locals: Vec<Value>,
+    frames: Vec<Frame>,
     budget: u64,
 }
 
@@ -77,6 +106,7 @@ impl<'env> Vm<'env> {
             registry: registry.clone(),
             stack: Vec::new(),
             locals: vec![Value::Null; locals],
+            frames: Vec::new(),
             budget: DEFAULT_INSTRUCTION_BUDGET,
         }
     }
@@ -84,6 +114,11 @@ impl<'env> Vm<'env> {
     pub fn with_budget(mut self, budget: u64) -> Self {
         self.budget = budget;
         self
+    }
+
+    /// Base index of the current scope's locals in the flat locals vector.
+    fn locals_base(&self) -> usize {
+        self.frames.last().map_or(0, |frame| frame.locals_base)
     }
 
     /// Execute to completion. Errors are values; panics are not possible
@@ -107,17 +142,19 @@ impl<'env> Vm<'env> {
                     self.stack.push(value.clone());
                 }
                 Instr::LoadLocal(slot) => {
+                    let slot = self.locals_base() + slot as usize;
                     let value = self
                         .locals
-                        .get(slot as usize)
+                        .get(slot)
                         .ok_or(VmError::BadProgram("local out of range"))?;
                     self.stack.push(value.clone());
                 }
                 Instr::StoreLocal(slot) => {
                     let value = self.pop()?;
+                    let slot = self.locals_base() + slot as usize;
                     let slot_ref = self
                         .locals
-                        .get_mut(slot as usize)
+                        .get_mut(slot)
                         .ok_or(VmError::BadProgram("local out of range"))?;
                     *slot_ref = value;
                 }
@@ -152,6 +189,71 @@ impl<'env> Vm<'env> {
                         (lhs, rhs) => return Err(type_mismatch("numbers", &lhs, &rhs)),
                     };
                     self.stack.push(diff);
+                }
+                Instr::Mul => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let product = match (lhs, rhs) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            a.checked_mul(b).map(Value::Int).ok_or(VmError::Overflow)?
+                        }
+                        (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+                        (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 * b),
+                        (Value::Float(a), Value::Int(b)) => Value::Float(a * b as f64),
+                        (lhs, rhs) => return Err(type_mismatch("numbers", &lhs, &rhs)),
+                    };
+                    self.stack.push(product);
+                }
+                // Integers are checked (zero divisor and i64::MIN / -1 are
+                // errors, never a panic); floats keep IEEE semantics --
+                // infinity/NaN from a zero divisor surface as data errors
+                // later, e.g. when compared.
+                Instr::Div => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let quotient = match (lhs, rhs) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            if b == 0 {
+                                return Err(VmError::DivisionByZero);
+                            }
+                            a.checked_div(b).map(Value::Int).ok_or(VmError::Overflow)?
+                        }
+                        (Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+                        (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 / b),
+                        (Value::Float(a), Value::Int(b)) => Value::Float(a / b as f64),
+                        (lhs, rhs) => return Err(type_mismatch("numbers", &lhs, &rhs)),
+                    };
+                    self.stack.push(quotient);
+                }
+                Instr::Rem => {
+                    let (rhs, lhs) = (self.pop()?, self.pop()?);
+                    let remainder = match (lhs, rhs) {
+                        (Value::Int(a), Value::Int(b)) => {
+                            if b == 0 {
+                                return Err(VmError::DivisionByZero);
+                            }
+                            a.checked_rem(b).map(Value::Int).ok_or(VmError::Overflow)?
+                        }
+                        (Value::Float(a), Value::Float(b)) => Value::Float(a % b),
+                        (Value::Int(a), Value::Float(b)) => Value::Float(a as f64 % b),
+                        (Value::Float(a), Value::Int(b)) => Value::Float(a % b as f64),
+                        (lhs, rhs) => return Err(type_mismatch("numbers", &lhs, &rhs)),
+                    };
+                    self.stack.push(remainder);
+                }
+                Instr::Neg => {
+                    let value = self.pop()?;
+                    let negated = match value {
+                        Value::Int(a) => {
+                            a.checked_neg().map(Value::Int).ok_or(VmError::Overflow)?
+                        }
+                        Value::Float(a) => Value::Float(-a),
+                        other => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "number",
+                                found: other.type_name(),
+                            })
+                        }
+                    };
+                    self.stack.push(negated);
                 }
                 Instr::Not => {
                     let value = self.pop()?;
@@ -221,21 +323,19 @@ impl<'env> Vm<'env> {
                         }
                     }
                 }
-                Instr::ListGet => {
+                // `list[int]` and `map[str]` share one instruction; the
+                // runtime error names what the script actually indexed.
+                Instr::IndexGet => {
                     let index = self.pop()?;
-                    let list = self.pop()?;
-                    match (list, index) {
+                    let container = self.pop()?;
+                    match (container, index) {
                         (Value::List(items), Value::Int(index)) => {
-                            let item = match items.get(index as usize) {
+                            let item = if index >= 0 {
+                                items.get(index as usize)
+                            } else {
                                 // Negative indices must not wrap through the
                                 // `as usize` cast into a bogus lookup.
-                                item if index >= 0 => item,
-                                _ => {
-                                    return Err(VmError::IndexOutOfRange {
-                                        index,
-                                        len: items.len(),
-                                    })
-                                }
+                                None
                             };
                             let item = item.ok_or(VmError::IndexOutOfRange {
                                 index,
@@ -249,13 +349,90 @@ impl<'env> Vm<'env> {
                                 found: other.type_name(),
                             })
                         }
+                        (Value::Map(map), Value::Str(key)) => match map.get(&key) {
+                            Some(value) => self.stack.push(value.clone()),
+                            None => return Err(VmError::UndefinedMember { field: key }),
+                        },
+                        (Value::Map(_), other) => {
+                            return Err(VmError::TypeMismatch {
+                                expected: "string key",
+                                found: other.type_name(),
+                            })
+                        }
                         (other, _) => {
                             return Err(VmError::TypeMismatch {
-                                expected: "list",
+                                expected: "list or map",
                                 found: other.type_name(),
                             })
                         }
                     }
+                }
+                Instr::BuildList(argc) => {
+                    let count = argc as usize;
+                    if count > self.stack.len() {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    let items = self.stack.split_off(self.stack.len() - count);
+                    self.stack.push(Value::List(Rc::new(items)));
+                }
+                Instr::BuildMap(argc) => {
+                    let count = argc as usize;
+                    if count * 2 > self.stack.len() {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    let flat = self.stack.split_off(self.stack.len() - count * 2);
+                    // Stack order is k1 v1 k2 v2 ...: BTreeMap insert means
+                    // a duplicate key keeps the LAST occurrence
+                    // (JSON-object semantics).
+                    let mut map = std::collections::BTreeMap::new();
+                    let mut i = 0;
+                    while i < flat.len() {
+                        let key = match &flat[i] {
+                            Value::Str(key) => key.clone(),
+                            other => {
+                                return Err(VmError::TypeMismatch {
+                                    expected: "string key",
+                                    found: other.type_name(),
+                                })
+                            }
+                        };
+                        map.insert(key, flat[i + 1].clone());
+                        i += 2;
+                    }
+                    self.stack.push(Value::Map(Rc::new(map)));
+                }
+                Instr::CallFn { index, argc } => {
+                    let function = self
+                        .program
+                        .functions
+                        .get(index as usize)
+                        .ok_or(VmError::BadProgram("function index out of range"))?;
+                    if self.frames.len() >= MAX_CALL_DEPTH {
+                        return Err(VmError::CallDepthExhausted);
+                    }
+                    let argc = argc as usize;
+                    if argc > self.stack.len() {
+                        return Err(VmError::StackUnderflow);
+                    }
+                    // Call sites are arity-checked at compile time; this is
+                    // the guard for hand-built (adversarial) programs.
+                    if argc != function.params as usize {
+                        return Err(VmError::BadProgram("function arity mismatch"));
+                    }
+                    let args = self.stack.split_off(self.stack.len() - argc);
+                    let locals_base = self.locals.len();
+                    self.locals.extend(args);
+                    // A hand-built FunctionInfo could claim fewer slots than
+                    // its params; max() keeps the args addressable (the
+                    // compiler always emits locals >= params).
+                    let slots = (function.locals as usize).max(argc);
+                    self.locals.resize(locals_base + slots, Value::Null);
+                    self.frames.push(Frame {
+                        return_pc: pc,
+                        locals_base,
+                        caller_locals_len: locals_base,
+                    });
+                    pc = function.start as usize;
                 }
                 Instr::CallNative { native, argc } => self.call_native(native, argc)?,
                 Instr::Jump(target) => {
@@ -274,7 +451,16 @@ impl<'env> Vm<'env> {
                     }
                 }
                 Instr::Return => {
-                    return Ok(self.pop().unwrap_or(Value::Null));
+                    let value = self.pop().unwrap_or(Value::Null);
+                    match self.frames.pop() {
+                        // Main body: the program is done.
+                        None => return Ok(value),
+                        Some(frame) => {
+                            self.locals.truncate(frame.caller_locals_len);
+                            pc = frame.return_pc;
+                            self.stack.push(value);
+                        }
+                    }
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! panics. These run with `cargo test` and are the executable subset of the
 //! verification story; model checking (Kani) is the planned next step.
 
-use cortex_engine::bytecode::{Instr, NativeId, Program};
+use cortex_engine::bytecode::{FunctionInfo, Instr, NativeId, Program};
 use cortex_engine::natives::{MemoryNative, NativeRegistry};
 use cortex_engine::value::Value;
 use cortex_engine::Vm;
@@ -45,12 +45,22 @@ fn adversarial_programs(count: usize, max_instrs: usize) -> Vec<Program> {
         Instr::Pop,
         Instr::Add,
         Instr::Sub,
+        Instr::Mul,
+        Instr::Div,
+        Instr::Rem,
+        Instr::Neg,
         Instr::Not,
         Instr::Eq,
         Instr::Less,
         Instr::MemberGet,
         Instr::ListLen,
-        Instr::ListGet,
+        Instr::IndexGet,
+        Instr::BuildList(2),
+        Instr::BuildMap(3),
+        Instr::CallFn {
+            index: 99, // out-of-range function
+            argc: 0,
+        },
         Instr::JumpIfFalse(1),
         Instr::Return,
     ];
@@ -59,19 +69,31 @@ fn adversarial_programs(count: usize, max_instrs: usize) -> Vec<Program> {
         .map(|_| {
             let len = rng.below(max_instrs as u64) as usize;
             let code = (0..len)
-                .map(|_| match rng.below(4) {
+                .map(|_| match rng.below(5) {
                     0 => Instr::CallNative {
                         native: native_ids[rng.below(4) as usize],
                         argc: rng.below(5) as u8,
                     },
                     1 => Instr::Jump(rng.below(len as u64 + 1) as u16),
                     2 => Instr::JumpIfFalse(rng.below(len as u64 + 1) as u16),
+                    // index 0 is a real (hostile) function: frames and the
+                    // depth cap get exercised, not just the range check.
+                    3 => Instr::CallFn {
+                        index: 0,
+                        argc: rng.below(5) as u8,
+                    },
                     _ => instr_pool[rng.below(instr_pool.len() as u64) as usize].clone(),
                 })
                 .collect();
             Program {
                 constants: vec![Value::Int(1), Value::Str("s".into()), Value::Bool(true)],
                 code,
+                functions: vec![FunctionInfo {
+                    name: "f".into(),
+                    start: 0,
+                    params: 2,
+                    locals: 4,
+                }],
                 locals: 1,
             }
         })
@@ -99,6 +121,7 @@ fn runaway_loop_hits_budget_instead_of_hanging() {
             Instr::Jump(0),
             Instr::Return,
         ],
+        functions: Vec::new(),
         locals: 0,
     };
     let mut env = MemoryNative::default();
@@ -115,6 +138,7 @@ fn stack_is_bounded_by_budget() {
     let program = Program {
         constants: vec![Value::Int(1)],
         code,
+        functions: Vec::new(),
         locals: 0,
     };
     let mut env = MemoryNative::default();

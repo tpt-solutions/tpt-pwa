@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ast::{BinOp, Expr, Lit, Stmt, Task};
-use crate::bytecode::{Instr, NativeId, Program};
+use crate::bytecode::{FunctionInfo, Instr, NativeId, Program};
 use crate::value::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,13 +39,70 @@ pub fn resolve_native(path: &[String]) -> Option<NativeId> {
 
 pub fn compile(task: &Task) -> Result<Program, CompileError> {
     let mut compiler = Compiler::default();
-    compiler.enter(); // task-level scope
+    // Function names resolve before anything compiles so calls may reference
+    // functions declared later (mutual recursion included).
+    for (index, function) in task.functions.iter().enumerate() {
+        if compiler
+            .functions
+            .insert(function.name.clone(), index)
+            .is_some()
+        {
+            return Err(CompileError {
+                message: format!("duplicate function `{}`", function.name),
+            });
+        }
+        compiler
+            .arities
+            .insert(function.name.clone(), function.params.len());
+    }
+
+    // Main body first (locals counted from 0).
+    compiler.enter();
     compiler.stmts(&task.body)?;
     compiler.emit(Instr::Return);
+    let main_locals = compiler.locals;
+
+    // Function bodies flatten after the main body; each starts with a fresh
+    // flat scope (params at slots 0..n) and its own local count.
+    let mut functions = Vec::new();
+    for function in &task.functions {
+        let start = compiler.offset(compiler.code.len())?;
+        let mut seen = std::collections::BTreeSet::new();
+        for param in &function.params {
+            if !seen.insert(param.clone()) {
+                return Err(CompileError {
+                    message: format!(
+                        "duplicate parameter `{param}` in function `{}`",
+                        function.name
+                    ),
+                });
+            }
+        }
+        compiler.reset_scope();
+        compiler.enter();
+        for param in &function.params {
+            compiler.declare(param)?;
+        }
+        compiler.stmts(&function.body)?;
+        // Falling off the end returns null, like `return;`.
+        let null = compiler.constant(Value::Null)?;
+        compiler.emit(Instr::Const(null));
+        compiler.emit(Instr::Return);
+        functions.push(FunctionInfo {
+            name: function.name.clone(),
+            start,
+            params: u8::try_from(function.params.len()).map_err(|_| CompileError {
+                message: format!("function `{}` has too many parameters", function.name),
+            })?,
+            locals: compiler.locals,
+        });
+    }
+
     Ok(Program {
         constants: compiler.constants,
         code: compiler.code,
-        locals: compiler.locals,
+        functions,
+        locals: main_locals,
     })
 }
 
@@ -55,6 +112,10 @@ struct Compiler {
     constants: Vec<Value>,
     scopes: Vec<BTreeMap<String, u16>>,
     locals: u16,
+    /// Task-level function table: name -> index into `Task::functions`
+    /// (bytecode `FunctionInfo` gets its start offset when bodies compile).
+    functions: BTreeMap<String, usize>,
+    arities: BTreeMap<String, usize>,
 }
 
 impl Compiler {
@@ -113,6 +174,13 @@ impl Compiler {
         self.scopes.pop();
     }
 
+    /// Fresh scope stack + local counter (used between the main body and
+    /// each function body; locals are per-scope-unit).
+    fn reset_scope(&mut self) {
+        self.scopes = vec![BTreeMap::new()];
+        self.locals = 0;
+    }
+
     fn stmts(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
         for stmt in stmts {
             self.stmt(stmt)?;
@@ -125,6 +193,16 @@ impl Compiler {
             Stmt::Let { name, expr } => {
                 self.expr(expr)?;
                 let slot = self.declare(name)?;
+                self.emit(Instr::StoreLocal(slot));
+            }
+            Stmt::Assign { name, expr } => {
+                // Only existing locals: containers are immutable by design,
+                // and assigning to an undeclared name is a typo, not a
+                // declaration.
+                let slot = self.resolve(name).ok_or_else(|| CompileError {
+                    message: format!("assignment to undefined variable `{name}`"),
+                })?;
+                self.expr(expr)?;
                 self.emit(Instr::StoreLocal(slot));
             }
             Stmt::If {
@@ -173,7 +251,7 @@ impl Compiler {
                 // item = iter[idx]
                 self.emit(Instr::LoadLocal(iter_slot));
                 self.emit(Instr::LoadLocal(idx_slot));
-                self.emit(Instr::ListGet);
+                self.emit(Instr::IndexGet);
                 self.enter();
                 let item_slot = self.declare(var)?;
                 self.emit(Instr::StoreLocal(item_slot));
@@ -189,6 +267,16 @@ impl Compiler {
                 let end = self.offset(self.code.len())?;
                 self.code[exit_patch] = Instr::JumpIfFalse(end);
                 self.leave();
+            }
+            Stmt::While { cond, body } => {
+                let loop_start = self.offset(self.code.len())?;
+                self.expr(cond)?;
+                let exit_patch = self.code.len();
+                self.emit(Instr::JumpIfFalse(0));
+                self.stmts(body)?;
+                self.emit(Instr::Jump(loop_start));
+                let end = self.offset(self.code.len())?;
+                self.code[exit_patch] = Instr::JumpIfFalse(end);
             }
             Stmt::Expr(expr) => {
                 self.expr(expr)?;
@@ -230,7 +318,26 @@ impl Compiler {
             Expr::Index { object, index } => {
                 self.expr(object)?;
                 self.expr(index)?;
-                self.emit(Instr::ListGet);
+                self.emit(Instr::IndexGet);
+            }
+            Expr::List(items) => {
+                let argc = u16::try_from(items.len()).map_err(|_| CompileError {
+                    message: "list literal too large".into(),
+                })?;
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.emit(Instr::BuildList(argc));
+            }
+            Expr::Map(pairs) => {
+                let argc = u16::try_from(pairs.len()).map_err(|_| CompileError {
+                    message: "map literal too large".into(),
+                })?;
+                for (key, value) in pairs {
+                    self.expr(key)?;
+                    self.expr(value)?;
+                }
+                self.emit(Instr::BuildMap(argc));
             }
             Expr::Member(object, field) => {
                 // Compile-time resolution of `native.<sub>.<call>` chains:
@@ -271,13 +378,48 @@ impl Compiler {
                         }
                     }
                 }
+                if let Expr::Ident(name) = &**callee {
+                    match self.functions.get(name) {
+                        Some(&index) => {
+                            let arity = self.arities[name];
+                            if arity != args.len() {
+                                return Err(CompileError {
+                                    message: format!(
+                                        "function `{name}` takes {arity} argument(s), got {}",
+                                        args.len()
+                                    ),
+                                });
+                            }
+                            let index = u16::try_from(index).map_err(|_| CompileError {
+                                message: "too many functions".into(),
+                            })?;
+                            let argc = u8::try_from(args.len()).map_err(|_| CompileError {
+                                message: "too many arguments".into(),
+                            })?;
+                            for arg in args {
+                                self.expr(arg)?;
+                            }
+                            self.emit(Instr::CallFn { index, argc });
+                            return Ok(());
+                        }
+                        None => {
+                            return Err(CompileError {
+                                message: format!("unknown function `{name}`"),
+                            });
+                        }
+                    }
+                }
                 return Err(CompileError {
-                    message: "only native.* calls are supported in this skeleton".into(),
+                    message: "only native.* calls and function calls are supported".into(),
                 });
             }
             Expr::UnaryNot(inner) => {
                 self.expr(inner)?;
                 self.emit(Instr::Not);
+            }
+            Expr::UnaryNeg(inner) => {
+                self.expr(inner)?;
+                self.emit(Instr::Neg);
             }
             Expr::Binary { op, lhs, rhs } => match op {
                 // `&&`/`||` short-circuit: the right side must not run (and
@@ -320,6 +462,9 @@ impl Compiler {
                         BinOp::GreaterEq => Instr::GreaterEq,
                         BinOp::Add => Instr::Add,
                         BinOp::Sub => Instr::Sub,
+                        BinOp::Mul => Instr::Mul,
+                        BinOp::Div => Instr::Div,
+                        BinOp::Rem => Instr::Rem,
                         BinOp::And | BinOp::Or => unreachable!("handled above"),
                     });
                 }
@@ -386,11 +531,21 @@ mod tests {
     }
 
     #[test]
-    fn calling_a_non_native_is_a_compile_error() {
-        // Parsing accepts the call shape; compiling rejects it.
+    fn calling_an_unknown_function_is_a_compile_error() {
+        // Parsing accepts the call shape; compiling rejects unknown names.
         let task = parse_task("task t() -> void { for x in items() { } }").expect("parses");
-        let err = compile(&task).expect_err("items() is not a native");
-        assert!(err.message.contains("only native.* calls"));
+        let err = compile(&task).expect_err("items() is not a function");
+        assert!(
+            err.message.contains("unknown function `items`"),
+            "got: {err}"
+        );
+
+        // A callee that is neither a native path nor a plain name is rejected
+        // too (the language has no first-class functions).
+        let task = parse_task("task t() -> void { let rows = native.db.query(\"s\"); rows[0](); }")
+            .expect("parses");
+        let err = compile(&task).expect_err("callables are not values");
+        assert!(err.message.contains("only native.* calls"), "got: {err}");
     }
 
     #[test]

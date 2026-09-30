@@ -22,6 +22,9 @@ pub enum Tok {
     Void,
     True,
     False,
+    Null,
+    While,
+    Fn,
     // punctuation / operators
     LParen,
     RParen,
@@ -29,6 +32,7 @@ pub enum Tok {
     RBrace,
     Comma,
     Semicolon,
+    Colon,
     Dot,
     LBracket,
     RBracket,
@@ -44,6 +48,9 @@ pub enum Tok {
     Not,
     Plus,
     Minus,
+    Star,
+    Slash,
+    Percent,
     And,
     Or,
     Eof,
@@ -127,6 +134,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 "void" => Tok::Void,
                 "true" => Tok::True,
                 "false" => Tok::False,
+                "null" => Tok::Null,
+                "while" => Tok::While,
+                "fn" => Tok::Fn,
                 _ => Tok::Ident(word),
             };
             tokens.push(Token {
@@ -263,6 +273,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 bump!();
                 tokens.push(simple(Tok::Semicolon));
             }
+            ':' => {
+                bump!();
+                tokens.push(simple(Tok::Colon));
+            }
             '.' => {
                 bump!();
                 tokens.push(simple(Tok::Dot));
@@ -319,6 +333,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             '+' => {
                 bump!();
                 tokens.push(simple(Tok::Plus));
+            }
+            '*' => {
+                bump!();
+                tokens.push(simple(Tok::Star));
+            }
+            '/' => {
+                bump!();
+                tokens.push(simple(Tok::Slash));
+            }
+            '%' => {
+                bump!();
+                tokens.push(simple(Tok::Percent));
             }
             '&' => {
                 bump!();

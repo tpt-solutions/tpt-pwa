@@ -7,6 +7,14 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Engine language upgrade: `null` literals, `*` `/` `%` (checked integer
+  division — zero divisors and i64::MIN / -1 are data errors), unary minus,
+  re-assignment of locals (`x = e;`), `while` loops, list and map literals
+  (`[1, 2]`, `{"k": v}`, indexable interchangeably with host data), and
+  task-level `fn` definitions with compile-time arity checks, mutual
+  recursion, and a 128-frame call-depth cap. [docs/language-reference.md](docs/language-reference.md)
+  rewritten to match; adversarial bytecode fuzzing extended to the new
+  instructions (frames, BuildList/BuildMap, CallFn).
 - PWA note search: multi-term AND matching over title and body with
   title-over-body ranking, wired to an accessible search box with a live
   result count.
