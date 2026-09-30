@@ -65,5 +65,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Real org.json implementation for JVM unit tests (the Android stub
     // throws "not mocked").
-    testImplementation("org.json:json:20240303")
+    testImplementation("org.json:json:20260814")
 }
