@@ -72,6 +72,13 @@ The database contains only what task scripts put there (the task queue and
 the PWA's notes live elsewhere by design), and the same `-allow-natives`
 gate decides whether a script may touch it at all.
 
+**Watch paths are sandboxed twice**: a task's `watch` glob is validated at
+enqueue (relative, no `..` traversal, no absolute paths) and re-contained
+against the physical data dir — symlinks resolved — on every watcher
+resync. The watcher is non-recursive and only signals that a matching file
+changed; it exposes no file contents to the script beyond what the script's
+own natives ( gated by `-allow-natives`) can read.
+
 ### 4. Sync payloads
 
 Outbox entries are handed to the configured sync endpoint as JSON with the

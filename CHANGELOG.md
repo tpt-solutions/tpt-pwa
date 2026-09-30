@@ -7,6 +7,13 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- File-watch triggers: `cortex.task.enqueue` accepts `watch` (a
+  data-dir-relative glob) as the third — and last — recurring form. The
+  task sleeps at a far-future RunAt until a matching file changes
+  (fsnotify, debounced 500ms, non-recursive), runs, and goes back to
+  sleep. Watch paths are contained to the data dir twice: lexically at
+  enqueue (-32602 on escapes) and physically on every watcher resync
+  (symlinks resolved).
 - Cron-scheduled tasks: `cortex.task.enqueue` accepts `cron` (a full
   5-field expression — lists, ranges, steps, month/day names, vixie
   DOM/DOW OR semantics, the daemon's local clock) alongside the existing

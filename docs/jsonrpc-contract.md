@@ -52,12 +52,13 @@ The PWA calls this implicitly via `checkCortexConnection()`; a successful handsh
 { "taskId": "53c281e98e29be47", "state": "queued", "accepted": 1, "deduplicated": false }
 ```
 
-Also accepted: `"payload": <any>` instead of `entries`, optional `"runAt": <RFC 3339>` to defer, and two recurring forms (mutually exclusive; both requeue the task with a fresh attempt budget after every successful completion):
+Also accepted: `"payload": <any>` instead of `entries`, optional `"runAt": <RFC 3339>` to defer, and three mutually exclusive recurring forms (each requeues the task with a fresh attempt budget after every successful completion):
 
 - `"every": "<Go duration>"` (e.g. `"5m"`) — fixed interval, RunAt = now + every;
-- `"cron": "<5-field expression>"` (e.g. `"0 9 * * 1-5"`, vixie semantics, the daemon's local clock) — RunAt = the next matching minute.
+- `"cron": "<5-field expression>"` (e.g. `"0 9 * * 1-5"`, vixie semantics, the daemon's local clock) — RunAt = the next matching minute;
+- `"watch": "<data-dir-relative glob>"` (e.g. `"inbox/*.csv"`) — event-triggered: the task sleeps until a matching file changes (created, written, removed, or renamed), wakes, runs, and goes back to sleep. Paths must stay inside the data dir; the watcher is non-recursive and matches only names directly in the pattern's directory.
 
-Recurrence stops when the task is cancelled, parked as `failed` (retry budget exhausted or a permanent failure), or pruned — `cortex.task.prune` never removes recurring tasks, even mid-completion. Recurring tasks also survive daemon restarts (a completed recurring task resumes its schedule). Invalid `every`/`cron` values are `-32602`. Params require exactly one of `entries`/`payload`; `kind` is mandatory and must be one of `syncNotes` or `crdtMerge` (anything else is `-32602`).
+Recurrence stops when the task is cancelled, parked as `failed` (retry budget exhausted or a permanent failure), or pruned — `cortex.task.prune` never removes recurring tasks, even mid-completion. Recurring tasks also survive daemon restarts (a completed recurring task resumes its schedule). Invalid `every`/`cron`/`watch` values are `-32602`. Params require exactly one of `entries`/`payload`; `kind` is mandatory and must be one of `syncNotes` or `crdtMerge` (anything else is `-32602`).
 
 `"batchId": "<string>"` is an optional idempotency key: re-submitting a batch whose queued/running task already carries that key returns the SAME task with `"deduplicated": true` instead of queueing it twice. The PWA derives the key from the batch contents, so a flush retried after a lost response dedupes.
 

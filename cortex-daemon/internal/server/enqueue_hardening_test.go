@@ -219,3 +219,66 @@ func TestEnqueueAcceptsAndValidatesCron(t *testing.T) {
 		t.Fatalf("every+cron: want -32602, got %v", err)
 	}
 }
+
+func TestEnqueueAcceptsAndValidatesWatch(t *testing.T) {
+	taskQueue := mustQueue(t)
+
+	// A relative glob lands on the task, which sleeps until file events.
+	encoded, _ := json.Marshal(map[string]any{
+		"kind":    "syncNotes",
+		"batchId": "watch-1",
+		"payload": map[string]any{},
+		"watch":   "inbox/*.csv",
+	})
+	result, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
+	if err != nil {
+		t.Fatalf("enqueue with watch: %v", err)
+	}
+	task, _ := taskQueue.Get(result.(map[string]any)["taskId"].(string))
+	if task.Watch != "inbox/*.csv" {
+		t.Fatalf("watch = %q", task.Watch)
+	}
+	if len(taskQueue.Due(time.Now())) != 0 {
+		t.Fatal("a watch task must enqueue asleep")
+	}
+
+	// Escapes and absolute paths are invalid params.
+	for _, bad := range []string{"../escape.csv", "/etc/exports/*", "a/../../x", ".."} {
+		params, _ := json.Marshal(map[string]any{
+			"kind":    "syncNotes",
+			"batchId": "watch-bad",
+			"payload": map[string]any{},
+			"watch":   bad,
+		})
+		_, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), params)
+		rpcErr, ok := err.(*rpc.RPCError)
+		if !ok || rpcErr.Code != rpc.CodeInvalidParams {
+			t.Fatalf("watch %q: want -32602, got %v", bad, err)
+		}
+	}
+
+	// watch is mutually exclusive with every and cron.
+	for _, extra := range []map[string]any{
+		{"every": "5m"},
+		{"cron": "0 9 * * *"},
+	} {
+		params := map[string]any{
+			"kind":    "syncNotes",
+			"batchId": "watch-xor",
+			"payload": map[string]any{},
+			"watch":   "inbox/*.csv",
+		}
+		for k, v := range extra {
+			params[k] = v
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		_, err = taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
+		rpcErr, ok := err.(*rpc.RPCError)
+		if !ok || rpcErr.Code != rpc.CodeInvalidParams {
+			t.Fatalf("watch + %v: want -32602, got %v", extra, err)
+		}
+	}
+}

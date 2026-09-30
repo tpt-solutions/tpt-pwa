@@ -53,7 +53,12 @@ type Task struct {
 	// the calendar variant of Every: the requeue fires at the next matching
 	// local-clock minute instead of a fixed interval later. Mutually
 	// exclusive with Every > 0.
-	Cron      string    `json:"cron,omitempty"`
+	Cron string `json:"cron,omitempty"`
+	// Watch, when set (a glob relative to the daemon's data dir), makes the
+	// task event-triggered: internal/filewatch wakes it when a matching
+	// file changes. Mutually exclusive with Every and Cron. Between events
+	// the task sleeps at a far-future RunAt (WatchSleepUntil).
+	Watch     string    `json:"watch,omitempty"`
 	State     State     `json:"state"`
 	Attempts  int       `json:"attempts"`
 	LastError string    `json:"lastError,omitempty"`
@@ -61,9 +66,14 @@ type Task struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// WatchSleepUntil is how far a watch task's RunAt is pushed between file
+// events: far enough never to fire by clock, near enough to stay a sane
+// timestamp (10 years).
+const WatchSleepUntil = 10 * 365 * 24 * time.Hour
+
 // IsRecurring reports whether the task re-enqueues itself after success.
 func (t Task) IsRecurring() bool {
-	return t.Every > 0 || t.Cron != ""
+	return t.Every > 0 || t.Cron != "" || t.Watch != ""
 }
 
 // PermanentError wraps a task failure that retrying can never fix (e.g. the
@@ -131,6 +141,9 @@ func Open(path string) (*Queue, error) {
 // falls back to "due now", where the scheduler's task timeout and the
 // regular retry path handle it like any other failure.
 func NextRunAt(t Task, now time.Time) time.Time {
+	if t.Watch != "" {
+		return now.Add(WatchSleepUntil)
+	}
 	if t.Every > 0 {
 		return now.Add(t.Every)
 	}
@@ -158,6 +171,10 @@ type Spec struct {
 	RunAt          time.Time
 	Every          time.Duration
 	Cron           string
+	// Watch is a data-dir-relative glob. Validated for shape here; its
+	// containment inside the data dir is the caller's job (the RPC handler
+	// owns the data-dir root).
+	Watch string
 }
 
 // EnqueueSpec appends a task unless a queued/running task with the same
@@ -167,6 +184,9 @@ type Spec struct {
 func (q *Queue) EnqueueSpec(spec Spec) (*Task, bool, error) {
 	if spec.Every > 0 && spec.Cron != "" {
 		return nil, false, fmt.Errorf("queue: every and cron are mutually exclusive")
+	}
+	if spec.Watch != "" && (spec.Every > 0 || spec.Cron != "") {
+		return nil, false, fmt.Errorf("queue: watch is mutually exclusive with every and cron")
 	}
 	if spec.Cron != "" {
 		if _, err := cron.Parse(spec.Cron); err != nil {
@@ -190,6 +210,10 @@ func (q *Queue) EnqueueSpec(spec Spec) (*Task, bool, error) {
 	} else {
 		runAt = runAt.UTC()
 	}
+	if spec.Watch != "" {
+		// Event-triggered: sleep until internal/filewatch wakes the task.
+		runAt = now.Add(WatchSleepUntil)
+	}
 	task := &Task{
 		ID:             newID(),
 		IdempotencyKey: spec.IdempotencyKey,
@@ -198,6 +222,7 @@ func (q *Queue) EnqueueSpec(spec Spec) (*Task, bool, error) {
 		RunAt:          runAt,
 		Every:          spec.Every,
 		Cron:           spec.Cron,
+		Watch:          spec.Watch,
 		State:          StateQueued,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -378,6 +403,36 @@ func (q *Queue) Requeue(id string, next time.Time, now time.Time) (Task, error) 
 		return Task{}, err
 	}
 	return *t, nil
+}
+
+// WakeTasks makes the given queued tasks due immediately (the file watcher
+// uses it on matching fs events). Running, completed, and failed tasks are
+// left alone; missing ids are ignored. Reports how many tasks woke up.
+func (q *Queue) WakeTasks(ids []string, now time.Time) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	woke := 0
+	for _, t := range q.tasks {
+		if !wanted[t.ID] || t.State != StateQueued {
+			continue
+		}
+		t.RunAt = now.UTC()
+		t.UpdatedAt = now.UTC()
+		woke++
+	}
+	if woke == 0 {
+		return 0, nil
+	}
+	if err := q.saveLocked(); err != nil {
+		// Disk is the source of truth: reload would be overkill for a wake,
+		// but memory must not claim a wake that was not persisted.
+		return 0, err
+	}
+	return woke, nil
 }
 
 // PruneFinished drops every completed/failed task and returns how many were

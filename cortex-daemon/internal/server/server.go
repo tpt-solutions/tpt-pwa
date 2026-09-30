@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/cron"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/engineexec"
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/filewatch"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/logging"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/rpc"
@@ -90,6 +92,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("open queue: %w", err)
 	}
+
+	// Event-triggered tasks: keep fsnotify watches aligned with the queue's
+	// watch patterns and wake matching tasks on file changes. With no watch
+	// tasks the loop is a no-op that costs one queue snapshot per tick.
+	go filewatch.Loop(ctx, taskQueue, cfg.DataDir, cfg.PollEvery, slog.Default())
 
 	// The task scripts' SQL surface: one SQLite file in the data dir.
 	// Best-effort at boot — a failure degrades db.* natives (they fail at
@@ -218,6 +225,27 @@ func allowedNativeSet(natives []string) map[string]bool {
 	return set
 }
 
+// validateWatchPath keeps watch globs inside the data dir: relative paths
+// only, no traversal out, no absolute forms. The filewatch loop re-checks
+// containment physically (symlinks included) on every resync; this is the
+// fast client-side rejection.
+func validateWatchPath(pattern string) error {
+	if pattern == "" {
+		return errors.New("watch must be a data-dir-relative glob")
+	}
+	if filepath.IsAbs(pattern) || strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, "\\\\") {
+		return errors.New("watch must be a data-dir-relative glob, not an absolute path")
+	}
+	if strings.Contains(pattern, "\x00") {
+		return errors.New("watch contains a NUL byte")
+	}
+	cleaned := filepath.Clean(pattern)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return errors.New("watch must stay inside the data dir")
+	}
+	return nil
+}
+
 // openTaskDB opens (creating if needed) the scripts' SQLite database at
 // <data-dir>/cortex.db.
 func openTaskDB(dataDir string) (*taskdb.DB, error) {
@@ -287,9 +315,12 @@ type enqueueParams struct {
 	// Every makes the task recur on successful completion (Go duration
 	// string, e.g. "5m"). Cron is the calendar variant (a 5-field cron
 	// expression, e.g. "0 9 * * 1-5"); the two are mutually exclusive.
-	// Empty = one-shot.
+	// Watch is the event-triggered variant: a glob relative to the data
+	// dir; the task wakes when a matching file changes. All three are
+	// mutually exclusive. Empty = one-shot.
 	Every string `json:"every,omitempty"`
 	Cron  string `json:"cron,omitempty"`
+	Watch string `json:"watch,omitempty"`
 }
 
 func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
@@ -335,11 +366,22 @@ func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
 		}
 		// Schedule params are client errors when wrong, so they are
 		// validated here (-32602) rather than mapped from queue-side errors.
-		if p.Every != "" && p.Cron != "" {
-			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "every and cron are mutually exclusive"}
+		schedules := 0
+		for _, flag := range []string{p.Every, p.Cron, p.Watch} {
+			if flag != "" {
+				schedules++
+			}
+		}
+		if schedules > 1 {
+			return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: "every, cron, and watch are mutually exclusive"}
 		}
 		if p.Cron != "" {
 			if _, err := cron.Parse(p.Cron); err != nil {
+				return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: err.Error()}
+			}
+		}
+		if p.Watch != "" {
+			if err := validateWatchPath(p.Watch); err != nil {
 				return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: err.Error()}
 			}
 		}
@@ -350,6 +392,7 @@ func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
 			RunAt:          runAt,
 			Every:          every,
 			Cron:           p.Cron,
+			Watch:          p.Watch,
 		})
 		if err != nil {
 			return nil, err
@@ -549,6 +592,9 @@ func taskToJSON(task queue.Task) map[string]any {
 	}
 	if task.Cron != "" {
 		out["cron"] = task.Cron
+	}
+	if task.Watch != "" {
+		out["watch"] = task.Watch
 	}
 	return out
 }
