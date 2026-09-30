@@ -4,7 +4,7 @@ import type { Note, NoteStorage } from './storage'
 import type { FlushOutcome } from './sync'
 import type { TaskSummary } from './telemetry'
 
-export type AppStatus = 'loading' | 'ready' | 'error'
+export type AppStatus = 'loading' | 'locked' | 'ready' | 'error'
 
 /** The negotiated execution environment, surfaced for the UI's status chips. */
 export type Capabilities = {
@@ -17,6 +17,9 @@ export type Capabilities = {
 }
 
 export const appStatus = writable<AppStatus>('loading')
+
+/** Note-encryption state for the UI (see cryptostate.ts / crypto.ts). */
+export const cryptoStatus = writable<{ enabled: boolean; unlocked: boolean }>({ enabled: false, unlocked: false })
 export const capabilities = writable<Capabilities>({ cortex: false, storageBackend: null, crdt: false })
 
 /** Newest-first note list; mutations are optimistic and rolled back on persistence failure. */

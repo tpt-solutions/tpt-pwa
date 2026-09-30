@@ -283,9 +283,23 @@ export async function checkCortexConnection(url?: string, timeoutMs?: number): P
  * a lost response produces the SAME key, so the daemon's queue dedupes it
  * instead of double-executing every entry. (A plain hash suffices — this is
  * dedup metadata, not a security boundary.)
+ *
+ * Deliberately EXCLUDES payload content: with sync encryption on, payloads
+ * are sealed fresh on every attempt (new IVs), so a content hash would make
+ * every retry look like a new batch. Entry id + action + queue order + the
+ * note's revision pin the batch just as uniquely.
  */
 function batchIdFor(entries: SyncOutboxEntry[]): string {
-  const data = JSON.stringify(entries.map((e) => [e.id, e.action, e.payload, e.queuedAt]))
+  const data = JSON.stringify(
+    entries.map((e) => [
+      e.id,
+      e.action,
+      e.queuedAt,
+      e.payload !== null && typeof e.payload === 'object' && 'updatedAt' in e.payload
+        ? (e.payload as { id: string; updatedAt: number }).id + '@' + (e.payload as { id: string; updatedAt: number }).updatedAt
+        : e.payload,
+    ]),
+  )
   // cyrb53: a plain 53-bit string hash — dedup metadata, not security.
   let h1 = 0xdeadbeef
   let h2 = 0x41c6ce57

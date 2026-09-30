@@ -7,6 +7,18 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Note encryption (2026-10 design decision): passphrase-derived
+  (WebCrypto PBKDF2-SHA256, 600k iterations), AES-GCM-256. At rest, note
+  titles/body and outbox/dead-letter payloads are ciphertext in local
+  storage behind a fail-closed wrapper (the app boots to a lock screen);
+  in sync, outbox payloads are sealed with a second key (fixed app salt,
+  so every device with the passphrase derives it) before the daemon or
+  endpoint ever sees them. Batch idempotency keys deliberately exclude
+  sealed bytes so retries still dedupe. The passphrase is never stored;
+  losing it is unrecoverable, by design. The CRDT mirror stays disabled
+  while encryption is on (its store is not yet encrypted). Batch ids are
+  now derived from stable fields only (id, action, queue order, note
+  revision).
 - File-watch triggers: `cortex.task.enqueue` accepts `watch` (a
   data-dir-relative glob) as the third — and last — recurring form. The
   task sleeps at a far-future RunAt until a matching file changes

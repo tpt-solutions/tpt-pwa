@@ -527,3 +527,39 @@ h2 {
   align-items: flex-start;
   gap: 8px;
 }
+
+/* ---- Encryption (lock screen + settings row) ------------------------------ */
+
+.crypto-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.crypto-input {
+  font: inherit;
+  font-size: 14px;
+  color: inherit;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  outline: none;
+  width: 180px;
+}
+
+.crypto-form .search-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.crypto-form .search-input:focus,
+.crypto-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.lock-screen .crypto-form {
+  width: 100%;
+}

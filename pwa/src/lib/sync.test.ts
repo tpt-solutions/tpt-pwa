@@ -1,9 +1,10 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { MemoryStorage } from './storage/memory'
 import { createStorage } from './storage'
 import type { Note, SyncOutboxEntry } from './storage'
 import { SyncManager } from './sync'
+import { deriveSyncKey } from './crypto'
 import type { SyncTransport } from './sync'
 
 function makeNote(overrides: Partial<Note> = {}): Note {
@@ -241,5 +242,62 @@ describe('SyncManager (spec §4 background sync)', () => {
     expect(first.via).toBe('cortex')
     expect(second.via).toBe('none') // outbox already empty
     expect(transport.batches).toHaveLength(1)
+  })
+})
+
+describe('sync encryption (end-to-end sealing)', () => {
+  // One derived key for the whole suite (derivation is the expensive part).
+  let syncKey: CryptoKey
+  beforeAll(async () => {
+    syncKey = await deriveSyncKey('shared passphrase')
+  })
+
+  it('seals payload contents before hand-off; ids stay plaintext', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const transport = new RecordingTransport()
+    const sync = new SyncManager({ storage, transport, getSyncKey: () => syncKey })
+
+    await sync.queueNote(makeNote(), 'create')
+    const outcome = await sync.flush()
+    expect(outcome.via).toBe('cortex')
+    expect(outcome.synced).toBe(1)
+
+    const [batch] = transport.batches
+    const payload = batch[0].payload as Note
+    expect(payload.title).not.toBe('Groceries')
+    expect(payload.title).toContain('"ct"')
+    expect(payload.body).toContain('"ct"')
+    // Routing metadata stays plaintext: the daemon dedupes and orders on it.
+    expect(payload.id).toBe('note-1')
+    expect(typeof payload.updatedAt).toBe('number')
+    expect(batch[0].action).toBe('create')
+  })
+
+  it('a retried flush produces a STABLE batchId despite fresh ciphertext', async () => {
+    // Two independent attempts flush the SAME stored entry: the sealed
+    // bytes differ (fresh IVs), but the identity fields the daemon dedupes
+    // on -- entry id, action, queue order, note revision -- must not.
+    const identity = async () => {
+      const storage = new MemoryStorage()
+      await storage.init()
+      await storage.enqueue({ id: 'note-1:create', kind: 'note', action: 'create', payload: makeNote({ createdAt: 1000, updatedAt: 2000 }), queuedAt: 42 })
+      const transport = new RecordingTransport()
+      const sync = new SyncManager({ storage, transport, getSyncKey: () => syncKey })
+      await sync.flush()
+      return transport.batches[0].map((e) => [e.id, e.action, e.queuedAt, (e.payload as Note).id, (e.payload as Note).updatedAt])
+    }
+    expect(JSON.stringify(await identity())).toBe(JSON.stringify(await identity()))
+  })
+
+  it('flushes plaintext when no sync key is configured (encryption off)', async () => {
+    const storage = new MemoryStorage()
+    await storage.init()
+    const transport = new RecordingTransport()
+    const sync = new SyncManager({ storage, transport })
+    await sync.queueNote(makeNote(), 'create')
+    await sync.flush()
+    const payload = transport.batches[0][0].payload as Note
+    expect(payload.title).toBe('Groceries')
   })
 })

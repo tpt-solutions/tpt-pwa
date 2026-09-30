@@ -1,6 +1,7 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import type { Note, NoteStorage, SyncOutboxAction, SyncOutboxEntry } from './storage'
 import { warnDev } from './devlog'
+import { encryptBox } from './crypto'
 
 /**
  * How completed outbox entries leave the device. Two implementations exist,
@@ -37,6 +38,34 @@ export interface SyncDeps {
   onlineTarget?: EventTarget | null
   /** Direct-HTTP fallback endpoint; `null` (the default) disables that path. */
   endpoint?: string | null
+  /**
+   * The session's sync key (end-to-end encryption). When it returns a key,
+   * every entry payload's title/body are sealed with it BEFORE any hand-off
+   * -- the daemon queue and the sync endpoint only ever hold ciphertext.
+   * Null/absent = payloads go as-is (encryption disabled).
+   */
+  getSyncKey?: () => CryptoKey | null
+}
+
+
+/**
+ * Seal one entry's payload for the wire: title/body under the sync key
+ * (fresh IVs per attempt). Ids and timestamps stay plaintext so the daemon
+ * can dedupe and the receiver can order without decrypting.
+ */
+async function sealEntry(entry: SyncOutboxEntry, key: CryptoKey): Promise<SyncOutboxEntry> {
+  if (entry.action === 'delete' || entry.payload === null || typeof entry.payload !== 'object' || !('title' in entry.payload)) {
+    return entry
+  }
+  const payload = entry.payload as Note
+  return {
+    ...entry,
+    payload: {
+      ...payload,
+      title: JSON.stringify(await encryptBox(key, payload.title)),
+      body: JSON.stringify(await encryptBox(key, payload.body)),
+    },
+  }
 }
 
 /** HTTP statuses that mean "this entry will NEVER succeed -- stop retrying". */
@@ -64,6 +93,7 @@ export class SyncManager {
   readonly #fetchFn: typeof fetch
   readonly #endpoint: string | null
   readonly #onlineTarget: EventTarget | null
+  readonly #getSyncKey: () => CryptoKey | null
   #chain: Promise<FlushOutcome> = Promise.resolve({ via: 'none', synced: 0, failed: 0, pending: 0 })
   #started = false
   #lastQueuedAt = 0
@@ -74,6 +104,7 @@ export class SyncManager {
     this.#fetchFn = deps.fetchFn ?? fetch
     this.#endpoint = deps.endpoint ?? DEFAULT_SYNC_ENDPOINT
     this.#onlineTarget = deps.onlineTarget ?? null
+    this.#getSyncKey = deps.getSyncKey ?? (() => null)
   }
 
   setTransport(transport: SyncTransport | null): void {
@@ -121,19 +152,24 @@ export class SyncManager {
   }
 
   async #flushOnce(): Promise<FlushOutcome> {
-    const entries = await this.#storage.pendingQueue()
-    if (entries.length === 0) return { via: 'none', synced: 0, failed: 0, pending: 0 }
+    const stored = await this.#storage.pendingQueue()
+    if (stored.length === 0) return { via: 'none', synced: 0, failed: 0, pending: 0 }
+    // End-to-end sealing happens per attempt (fresh IVs): the daemon and
+    // the endpoint hold ciphertext, and batch identity is unaffected --
+    // batchIdFor deliberately hashes only stable fields.
+    const syncKey = this.#getSyncKey()
+    const entries = syncKey ? await Promise.all(stored.map((entry) => sealEntry(entry, syncKey))) : stored
 
     // Path A (spec §4): daemon connected -- delegate and let it own retries.
     // The PWA can be closed immediately after this resolves.
     if (this.#transport?.available) {
       try {
         await this.#transport.enqueueSyncTask(entries)
-        for (const entry of entries) {
+        for (const entry of stored) {
           // One at a time: a failed dequeue must not abandon its siblings.
           await this.#storage.dequeue(entry.id)
         }
-        return { via: 'cortex', synced: entries.length, failed: 0, pending: 0 }
+        return { via: 'cortex', synced: stored.length, failed: 0, pending: 0 }
       } catch (error) {
         // Daemon accepted the connection but dropped mid-handoff: degrade.
         warnDev('sync', error)

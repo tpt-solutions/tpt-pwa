@@ -7,10 +7,13 @@ import { loadCrdtSnapshot, persistCrdtSnapshot } from './crdt-store'
 import { warnDev } from './devlog'
 import { createStorageWithLeaderElection } from './storage'
 import type { Note, NoteId, NoteStorage } from './storage'
+import { createEncryptedStorage } from './storage/encrypted'
+import { atRestSlot, cryptoEnabled, cryptoUnlocked, disableCrypto, enableCrypto, getSyncKey, unlockCrypto } from './cryptostate'
 import { SyncManager } from './sync'
 import { summarizeTasks } from './telemetry'
-import { appStatus, capabilities, daemonTasks, daemonVersion, lastFlush, notes, online, pendingSync } from './stores'
+import { appStatus, capabilities, cryptoStatus, daemonTasks, daemonVersion, lastFlush, notes, online, pendingSync } from './stores'
 
+let rawStorage: NoteStorage | null = null
 let storage: NoteStorage | null = null
 let sync: SyncManager | null = null
 let crdtDoc: NoteDoc | null = null
@@ -18,6 +21,8 @@ const saveTimers = new Map<NoteId, ReturnType<typeof setTimeout>>()
 const SAVE_DEBOUNCE_MS = 400
 
 let initPromise: Promise<void> | null = null
+let finishDone = false
+let listenersInstalled = false
 
 /** App bootstrap: negotiate storage, load notes, feature-detect the daemon, arm sync triggers. Idempotent. */
 export function initApp(): Promise<void> {
@@ -30,7 +35,9 @@ async function doInit(): Promise<void> {
     // Web Locks leader election (where available): one tab owns storage
     // decisions (backend choice, migration); others open the same database
     // in follower mode instead of silently picking a different one.
-    storage = await createStorageWithLeaderElection()
+    rawStorage = await createStorageWithLeaderElection()
+    storage = cryptoEnabled() ? createEncryptedStorage(rawStorage, atRestSlot) : rawStorage
+    cryptoStatus.set({ enabled: cryptoEnabled(), unlocked: cryptoUnlocked() })
     capabilities.update((c) => ({ ...c, storageBackend: storage!.backend }))
     // Ask for durable storage while we're at it: without persistence the
     // browser may evict OPFS/IndexedDB under pressure, defeating the whole
@@ -42,22 +49,51 @@ async function doInit(): Promise<void> {
       warnDev('app', error)
     }
 
+    // Encrypted but not unlocked this session: stop here. The lock screen
+    // takes the passphrase, and unlockWith resumes the rest of the boot.
+    if (cryptoEnabled() && !cryptoUnlocked()) {
+      appStatus.set('locked')
+      return
+    }
+
+    await finishInit()
+  } catch (error) {
+    initPromise = null // allow a retry after a failed bootstrap
+    warnDev('app', error)
+    appStatus.set('error')
+  }
+}
+
+/**
+ * The post-unlock half of the boot: load notes, arm the CRDT mirror and the
+ * sync triggers, negotiate the daemon. Runs exactly once per session.
+ */
+async function finishInit(): Promise<void> {
+  if (finishDone || !storage) return
+  try {
     await refreshNotes()
 
-    // CRDT mirror is best-effort: absence only disables multi-device merge, never the app.
-    const snapshot = await loadCrdtSnapshot()
-    crdtDoc = await NoteDoc.open(snapshot ?? undefined)
-    if (crdtDoc && !snapshot) {
-      // First run: seed the mirror from durable storage so a later merge
-      // starts from what the user already has.
-      for (const note of await storage.listNotes()) crdtDoc.upsertNote(note)
-      await persistCrdt()
+    // CRDT mirror is best-effort: absence only disables multi-device merge,
+    // never the app. While encryption is on the mirror stays OFF -- it
+    // persists note content in its own store and is not encrypted yet, so
+    // keeping it live would leak plaintext beside the encrypted rows.
+    if (cryptoEnabled()) {
+      capabilities.update((c) => ({ ...c, crdt: false }))
+    } else {
+      const snapshot = await loadCrdtSnapshot()
+      crdtDoc = await NoteDoc.open(snapshot ?? undefined)
+      if (crdtDoc && !snapshot) {
+        // First run: seed the mirror from durable storage so a later merge
+        // starts from what the user already has.
+        for (const note of await storage.listNotes()) crdtDoc.upsertNote(note)
+        await persistCrdt()
+      }
+      capabilities.update((c) => ({ ...c, crdt: crdtDoc !== null }))
     }
-    capabilities.update((c) => ({ ...c, crdt: crdtDoc !== null }))
 
-    sync = new SyncManager({ storage, onlineTarget: typeof window !== 'undefined' ? window : null })
-    sync.start()
-    if (typeof window !== 'undefined') {
+    installStorage(storage)
+    if (typeof window !== 'undefined' && !listenersInstalled) {
+      listenersInstalled = true
       window.addEventListener('online', () => {
         online.set(true)
         void flushSync()
@@ -124,13 +160,60 @@ async function doInit(): Promise<void> {
       if (sync) sync.setTransport(new CortexSyncTransport())
     }
 
+    finishDone = true
     appStatus.set('ready')
     void flushSync()
   } catch (error) {
-    initPromise = null // allow a retry after a failed bootstrap
     warnDev('app', error)
     appStatus.set('error')
   }
+}
+
+/**
+ * Unlock an encrypted session: verify the passphrase, fill the key slots,
+ * and run the deferred half of the boot. Resolves false on a wrong
+ * passphrase; throws when encryption is not set up.
+ */
+export async function unlockWith(passphrase: string): Promise<boolean> {
+  if (!cryptoEnabled() || finishDone) return false
+  const ok = await unlockCrypto(passphrase)
+  if (!ok) return false
+  cryptoStatus.set({ enabled: true, unlocked: true })
+  await finishInit()
+  return true
+}
+
+/**
+ * First-time setup (or re-enable after disabling): persist the passphrase
+ * metadata and swap the encrypted storage in. Existing plaintext rows
+ * re-encrypt on their next write; legacy rows keep reading transparently.
+ */
+export async function enableEncryption(passphrase: string): Promise<void> {
+  await enableCrypto(passphrase)
+  storage = createEncryptedStorage(rawStorage ?? storage!, atRestSlot)
+  installStorage(storage)
+  cryptoStatus.set({ enabled: true, unlocked: true })
+  await refreshNotes()
+}
+
+/** Turn encryption off: verify, rewrite everything as plaintext, unseal the app. */
+export async function disableEncryption(passphrase: string): Promise<void> {
+  const raw = rawStorage ?? storage
+  const sealed = storage
+  if (!raw || !sealed) throw new Error('app not initialised')
+  await disableCrypto(passphrase, raw, sealed)
+  storage = raw
+  installStorage(raw)
+  cryptoStatus.set({ enabled: false, unlocked: false })
+  await refreshNotes()
+}
+
+/** (Re)point the sync manager at the active storage. */
+function installStorage(active: NoteStorage): void {
+  storage = active
+  sync?.stop()
+  sync = new SyncManager({ storage: active, onlineTarget: typeof window !== 'undefined' ? window : null, getSyncKey })
+  sync.start()
 }
 
 export async function refreshNotes(): Promise<void> {

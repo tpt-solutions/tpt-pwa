@@ -11,8 +11,18 @@
     online,
     pendingSync,
     swUpdateReady,
+    cryptoStatus,
   } from './lib/stores'
-  import { createNote, deleteNote, importNotes, refreshTelemetry, updateNote } from './lib/app'
+  import {
+    createNote,
+    deleteNote,
+    disableEncryption,
+    enableEncryption,
+    importNotes,
+    refreshTelemetry,
+    unlockWith,
+    updateNote,
+  } from './lib/app'
   import { describeOutcome } from './lib/telemetry'
   import { searchNotes } from './lib/search'
   import { exportFilename, exportNotesJson, exportNotesMarkdown, parseNotesJson, parseNotesMarkdown } from './lib/transfer'
@@ -37,6 +47,45 @@
   const searching = $derived(searchQuery.trim() !== '')
   /** Momentary feedback (export/import summaries); announced and shown inline. */
   let momentaryNotice = $state('')
+  /** Lock screen + encryption settings state. */
+  let passphrase = $state('')
+  let cryptoError = $state('')
+
+  async function tryUnlock(): Promise<void> {
+    cryptoError = ''
+    try {
+      if (!(await unlockWith(passphrase))) cryptoError = 'Wrong passphrase.'
+      else passphrase = ''
+    } catch (error) {
+      cryptoError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function enableCrypto(): Promise<void> {
+    cryptoError = ''
+    try {
+      if (passphrase.length < 8) {
+        cryptoError = 'Use at least 8 characters — there is no recovery if you forget it.'
+        return
+      }
+      await enableEncryption(passphrase)
+      passphrase = ''
+      announce('Note encryption enabled')
+    } catch (error) {
+      cryptoError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function turnOffCrypto(): Promise<void> {
+    cryptoError = ''
+    try {
+      await disableEncryption(passphrase)
+      passphrase = ''
+      announce('Note encryption disabled — notes are stored as plaintext')
+    } catch (error) {
+      cryptoError = error instanceof Error ? error.message : String(error)
+    }
+  }
   /** Live region: while searching, the result count is what assistive tech needs to hear. */
   const searchNotice = $derived(searching ? `${visibleNotes.length} ${visibleNotes.length === 1 ? 'note' : 'notes'} match` : '')
   const announcement = $derived(searchNotice !== '' ? searchNotice : momentaryNotice)
@@ -215,6 +264,22 @@
         <h1>Storage unavailable</h1>
         <p class="muted">Local persistence failed to initialise. Reload to retry capability negotiation.</p>
       </section>
+    {:else if $appStatus === 'locked'}
+      <section class="card pad empty">
+        <h1>Locked</h1>
+        <p class="muted">Your notes are encrypted. Enter your passphrase to unlock — it never leaves this device.</p>
+        <form
+          class="crypto-form"
+          onsubmit={(event) => {
+            event.preventDefault()
+            void tryUnlock()
+          }}
+        >
+          <input class="search-input" type="password" autocomplete="current-password" bind:value={passphrase} aria-label="Passphrase" />
+          <button class="button" type="submit">Unlock</button>
+        </form>
+        {#if cryptoError}<p class="playground-error" role="alert">{cryptoError}</p>{/if}
+      </section>
     {:else if view.name === 'list'}
       <section class="list-view">
         <div class="list-toolbar">
@@ -329,6 +394,35 @@
       <dd>{backendLabel}</dd>
       <dt>crdt</dt>
       <dd>{$capabilities.crdt ? 'ready (automerge Wasm)' : 'unavailable'}</dd>
+      <dt>encryption</dt>
+      <dd>
+        {#if !$cryptoStatus.enabled}
+          <span class="muted">off — </span>
+          <form
+            class="crypto-form"
+            onsubmit={(event) => {
+              event.preventDefault()
+              void enableCrypto()
+            }}
+          >
+            <input class="crypto-input" type="password" autocomplete="new-password" bind:value={passphrase} aria-label="New passphrase (at least 8 characters)" placeholder="New passphrase" />
+            <button class="button button--small" type="submit">Encrypt notes</button>
+          </form>
+        {:else}
+          <span class="ok">on</span>
+          <form
+            class="crypto-form"
+            onsubmit={(event) => {
+              event.preventDefault()
+              void turnOffCrypto()
+            }}
+          >
+            <input class="crypto-input" type="password" autocomplete="current-password" bind:value={passphrase} aria-label="Passphrase to disable encryption" placeholder="Passphrase" />
+            <button class="button button--small button--danger" type="submit">Disable</button>
+          </form>
+        {/if}
+        {#if cryptoError}<span class="playground-error">{cryptoError}</span>{/if}
+      </dd>
       <dt>daemon tasks</dt>
       <dd>
         {#if $capabilities.cortex && $daemonTasks}
