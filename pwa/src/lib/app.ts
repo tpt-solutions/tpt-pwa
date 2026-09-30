@@ -255,6 +255,57 @@ export async function deleteNote(id: NoteId): Promise<void> {
   }
 }
 
+/**
+ * Merge imported notes (from a JSON/Markdown file, see `transfer.ts`) into
+ * local storage. Last-writer-wins per note against what's already here:
+ * newer imports overwrite, older ones are ignored, imported tombstones
+ * delete. Every applied note enters the outbox like a local edit, so imports
+ * propagate to other devices through the normal sync paths.
+ */
+export async function importNotes(incoming: Note[]): Promise<{ added: number; updated: number; deleted: number }> {
+  if (!storage) throw new Error('app not initialised')
+  let added = 0
+  let updated = 0
+  let deleted = 0
+
+  for (const raw of incoming) {
+    // Imported data is a local edit from elsewhere: never pre-stamped as synced.
+    const note: Note = { ...raw, syncedAt: null }
+    const local = await storage.getNote(note.id)
+
+    if (local === undefined) {
+      // A tombstone for a note we don't have deletes nothing; skip it.
+      if (note.deletedAt !== null) continue
+      if (!Number.isFinite(note.createdAt) || note.createdAt <= 0) note.createdAt = note.updatedAt
+      if (!Number.isFinite(note.updatedAt) || note.updatedAt <= 0) note.updatedAt = Date.now()
+      await storage.upsertNote(note)
+      await sync?.queueNote(note, 'create')
+      crdtDoc?.upsertNote(note)
+      added++
+    } else if (note.updatedAt > local.updatedAt) {
+      if (note.deletedAt !== null) {
+        // Newer tombstone: the delete wins locally and must propagate.
+        const tombstone: Note = { ...local, deletedAt: note.deletedAt, updatedAt: note.deletedAt }
+        await storage.upsertNote(tombstone)
+        await sync?.queueNote(local, 'delete', note.deletedAt)
+        crdtDoc?.removeNote(note.id, note.deletedAt)
+        deleted++
+      } else {
+        await storage.upsertNote(note)
+        await sync?.queueNote(note, 'update')
+        crdtDoc?.upsertNote(note)
+        updated++
+      }
+    }
+    // else: the local copy is at least as new -- nothing to do.
+  }
+
+  await persistCrdt()
+  await refreshNotes()
+  await bumpPending()
+  return { added, updated, deleted }
+}
+
 /** Drain the outbox now; updates the pending count and telemetry with the authoritative result. */
 export async function flushSync(): Promise<void> {
   if (!sync) return

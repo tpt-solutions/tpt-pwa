@@ -12,8 +12,10 @@
     pendingSync,
     swUpdateReady,
   } from './lib/stores'
-  import { createNote, deleteNote, refreshTelemetry, updateNote } from './lib/app'
+  import { createNote, deleteNote, importNotes, refreshTelemetry, updateNote } from './lib/app'
   import { describeOutcome } from './lib/telemetry'
+  import { searchNotes } from './lib/search'
+  import { exportFilename, exportNotesJson, exportNotesMarkdown, parseNotesJson, parseNotesMarkdown } from './lib/transfer'
   import { warnDev } from './lib/devlog'
   import { applySwUpdate } from './main'
   import type { Note } from './lib/storage'
@@ -22,6 +24,7 @@
 
   let view = $state<View>({ name: 'list' })
   let statusOpen = $state(false)
+  let searchQuery = $state('')
 
   function findSelected(notesList: Note[], current: View): Note | null {
     if (current.name !== 'editor') return null
@@ -29,11 +32,22 @@
   }
 
   const selected = $derived(findSelected($notes, view))
+  const visibleNotes = $derived(searchNotes($notes, searchQuery))
+  const searching = $derived(searchQuery.trim() !== '')
+  /** Momentary feedback (export/import summaries); announced and shown inline. */
+  let momentaryNotice = $state('')
+  /** Live region: while searching, the result count is what assistive tech needs to hear. */
+  const searchNotice = $derived(searching ? `${visibleNotes.length} ${visibleNotes.length === 1 ? 'note' : 'notes'} match` : '')
+  const announcement = $derived(searchNotice !== '' ? searchNotice : momentaryNotice)
   const backendLabel = $derived(
     { sqlite: 'SQLite · OPFS', indexeddb: 'IndexedDB', memory: 'In-memory (session)' }[
       $capabilities.storageBackend ?? 'memory'
     ],
   )
+
+  function announce(message: string): void {
+    momentaryNotice = message
+  }
 
   /** The status panel pulls fresh daemon telemetry whenever it opens. */
   function toggleStatus(event: Event): void {
@@ -44,12 +58,49 @@
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
   const formatWhen = (ts: number) => dateFormat.format(new Date(ts))
 
-  /** Route view swaps through the View Transitions API when available (spec §3 Layer 1). */
+  /** Route view swaps through the View Transitions API when available (spec §3 Layer 1); skipped for reduced-motion users. */
   function transition(update: () => void): void {
-    if (typeof document.startViewTransition === 'function') {
+    if (typeof document.startViewTransition === 'function' && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       void document.startViewTransition(() => update()).finished.catch(() => {})
     } else {
       update()
+    }
+  }
+
+  function download(filename: string, text: string, type: string): void {
+    const url = URL.createObjectURL(new Blob([text], { type }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  function exportAs(format: 'json' | 'md'): void {
+    const live = $notes
+    if (live.length === 0) {
+      announce('Nothing to export — no notes yet')
+      return
+    }
+    if (format === 'json') download(exportFilename('json'), exportNotesJson(live), 'application/json')
+    else download(exportFilename('md'), exportNotesMarkdown(live), 'text/markdown')
+    announce(`Exported ${live.length} ${live.length === 1 ? 'note' : 'notes'} as ${format === 'json' ? 'JSON' : 'Markdown'}`)
+  }
+
+  async function importFile(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = '' // re-selecting the same file must re-fire change
+    if (!file) return
+    try {
+      const text = await file.text()
+      const incoming = /\.md$/i.test(file.name) || file.type === 'text/markdown' ? parseNotesMarkdown(text) : parseNotesJson(text)
+      const { added, updated, deleted } = await importNotes(incoming)
+      const parts = [`${added} added`, `${updated} updated`, `${deleted} deleted`].filter((part) => !part.startsWith('0 '))
+      announce(`Imported: ${parts.length > 0 ? parts.join(', ') : 'nothing changed (local notes were newer)'}`)
+    } catch (error) {
+      warnDev('app', error)
+      announce(`Import failed: ${error instanceof Error ? error.message : 'unknown error'}`)
     }
   }
 
@@ -119,6 +170,9 @@
       <span class="brand-name">tpt-pwa</span>
     </div>
     <div class="header-status">
+      <p class="visually-hidden" role="status" aria-live="polite">
+        {!$online ? 'Offline: changes queue locally until connectivity returns' : $pendingSync > 0 ? `${$pendingSync} changes waiting to sync` : ''}
+      </p>
       {#if !$online}
         <span class="chip chip--warn" title="Changes queue locally until connectivity returns">offline</span>
       {/if}
@@ -157,8 +211,26 @@
       <section class="list-view">
         <div class="list-toolbar">
           <h1>Notes</h1>
-          <button class="button" onclick={() => void newNote()}>+ New note</button>
+          <div class="toolbar-actions">
+            <button class="button" onclick={() => void newNote()}>+ New note</button>
+            <button class="button button--ghost" title="Download all notes as JSON (lossless round-trip)" onclick={() => exportAs('json')}>Export JSON</button>
+            <button class="button button--ghost" title="Download all notes as one Markdown file" onclick={() => exportAs('md')}>Export MD</button>
+            <label class="button button--ghost" title="Merge notes from a JSON or Markdown export">
+              Import
+              <input class="visually-hidden" type="file" accept=".json,.md,.markdown,.txt,application/json,text/markdown" onchange={(event) => void importFile(event)} />
+            </label>
+          </div>
         </div>
+        <div class="list-toolbar-secondary">
+          <input
+            class="search-input"
+            type="search"
+            placeholder="Search notes…"
+            aria-label="Search notes"
+            bind:value={searchQuery}
+          />
+        </div>
+        <p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
         {#if $notes.length === 0}
           <div class="card pad empty">
             <h2>No notes yet</h2>
@@ -169,16 +241,22 @@
             </p>
             <button class="button" onclick={() => void newNote()}>Create your first note</button>
           </div>
+        {:else if visibleNotes.length === 0}
+          <div class="card pad empty" role="status">
+            <h2>No notes match</h2>
+            <p class="muted">Nothing matches “{searchQuery.trim()}”. Try fewer or different words.</p>
+            <button class="button" onclick={() => (searchQuery = '')}>Clear search</button>
+          </div>
         {:else}
           <ul class="note-list">
-            {#each $notes as note (note.id)}
+            {#each visibleNotes as note (note.id)}
               <li>
                 <button class="note-card" onclick={() => openEditor(note)}>
                   <span class="note-title">{note.title === '' ? 'Untitled' : note.title}</span>
                   <span class="note-body">{note.body === '' ? 'No content yet' : note.body}</span>
                   <span class="note-meta">
                     {formatWhen(note.updatedAt)}
-                    {#if note.syncedAt === null}<span class="dot dot--pending" title="Waiting to sync"></span>{/if}
+                    {#if note.syncedAt === null}<span class="dot dot--pending" role="img" aria-label="Waiting to sync" title="Waiting to sync"></span>{/if}
                   </span>
                 </button>
               </li>
@@ -195,6 +273,7 @@
         <input
           class="editor-title"
           placeholder="Title"
+          aria-label="Note title"
           value={selected.title}
           oninput={(event) => {
             const current = selected
@@ -204,6 +283,7 @@
         <textarea
           class="editor-body"
           placeholder="Start writing — everything is saved locally as you type."
+          aria-label="Note body"
           value={selected.body}
           oninput={(event) => {
             const current = selected

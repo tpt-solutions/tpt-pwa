@@ -1,7 +1,7 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 import { beforeEach, describe, expect, it } from 'vitest'
 import { get } from 'svelte/store'
-import { createNote, deleteNote, flushPendingSaves, updateNote, __setAppStorageForTests } from './app'
+import { createNote, deleteNote, flushPendingSaves, importNotes, updateNote, __setAppStorageForTests } from './app'
 import { MemoryStorage } from './storage/memory'
 import type { Note, NoteStorage, SyncOutboxEntry } from './storage'
 import { notes, pendingSync } from './stores'
@@ -117,6 +117,67 @@ describe('app note lifecycle', () => {
     const stored = await storage.getNote(note.id)
     expect(stored!.updatedAt).toBeGreaterThan(storedUpdatedAt)
     expect(stored!.title).toBe('after clock jump')
+  })
+})
+
+describe('importNotes (LWW merge from file exports)', () => {
+  let storage: FlakyStorage
+  beforeEach(async () => {
+    storage = new FlakyStorage()
+    __setAppStorageForTests(storage)
+    notes.set([])
+    pendingSync.set(0)
+  })
+
+  it('adds unknown notes like local creates: stored, outboxed, visible', async () => {
+    const imported: Note = { id: 'n1', title: 'From file', body: 'hi', createdAt: 10, updatedAt: 20, syncedAt: 15, deletedAt: null }
+    const result = await importNotes([imported])
+
+    expect(result).toEqual({ added: 1, updated: 0, deleted: 0 })
+    expect((await storage.getNote('n1'))?.title).toBe('From file')
+    // Imported data is a local edit from elsewhere: never pre-stamped as synced.
+    expect((await storage.getNote('n1'))?.syncedAt).toBeNull()
+    expect((await storage.pendingQueue()).map((e) => e.action)).toEqual(['create'])
+    expect(get(notes).map((n) => n.id)).toEqual(['n1'])
+  })
+
+  it('overwrites an older local copy and ignores an older import', async () => {
+    await importNotes([{ id: 'n1', title: 'v1', body: '', createdAt: 1, updatedAt: 100, syncedAt: null, deletedAt: null }])
+
+    // Newer import wins...
+    const result = await importNotes([{ id: 'n1', title: 'v2', body: '', createdAt: 1, updatedAt: 200, syncedAt: null, deletedAt: null }])
+    expect(result).toEqual({ added: 0, updated: 1, deleted: 0 })
+    expect((await storage.getNote('n1'))?.title).toBe('v2')
+
+    // ...an older one changes nothing.
+    const second = await importNotes([{ id: 'n1', title: 'v0', body: '', createdAt: 1, updatedAt: 50, syncedAt: null, deletedAt: null }])
+    expect(second).toEqual({ added: 0, updated: 0, deleted: 0 })
+    expect((await storage.getNote('n1'))?.title).toBe('v2')
+    expect((await storage.pendingQueue()).filter((e) => e.action === 'update')).toHaveLength(1)
+  })
+
+  it('applies a newer imported tombstone as a real delete that propagates', async () => {
+    await importNotes([{ id: 'n1', title: 'doomed', body: '', createdAt: 1, updatedAt: 100, syncedAt: null, deletedAt: null }])
+
+    const result = await importNotes([{ id: 'n1', title: 'doomed', body: '', createdAt: 1, updatedAt: 500, syncedAt: null, deletedAt: 500 }])
+    expect(result).toEqual({ added: 0, updated: 0, deleted: 1 })
+    expect(await storage.getNote('n1')).toBeUndefined()
+    expect((await storage.pendingQueue()).at(-1)?.action).toBe('delete')
+  })
+
+  it('skips tombstones for notes it does not have', async () => {
+    const result = await importNotes([{ id: 'ghost', title: '', body: '', createdAt: 1, updatedAt: 100, syncedAt: null, deletedAt: 100 }])
+    expect(result).toEqual({ added: 0, updated: 0, deleted: 0 })
+    expect((await storage.pendingQueue())).toEqual([])
+    expect(get(notes)).toEqual([])
+  })
+
+  it('imports merge with existing local activity in the same outbox', async () => {
+    await createNote('typed locally')
+    await importNotes([{ id: 'n1', title: 'from file', body: '', createdAt: 1, updatedAt: 10, syncedAt: null, deletedAt: null }])
+    const actions = (await storage.pendingQueue()).map((e) => e.action).sort()
+    expect(actions).toEqual(['create', 'create'])
+    expect(get(notes).map((n) => n.title).sort()).toEqual(['from file', 'typed locally'])
   })
 })
 

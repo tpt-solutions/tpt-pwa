@@ -35,23 +35,38 @@ body {
 
 /* ---- View Transitions (spec §3 Layer 1) -------------------------------- */
 
-::view-transition-old(root) {
-  animation: vt-fade-out 120ms ease-in;
-}
+/* Motion is a garnish: users who ask for reduced motion get none of it,
+   including the JS-guarded startViewTransition path in App.svelte. */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root) {
+    animation: vt-fade-out 120ms ease-in;
+  }
 
-::view-transition-new(root) {
-  animation: vt-fade-in 160ms ease-out;
-}
+  ::view-transition-new(root) {
+    animation: vt-fade-in 160ms ease-out;
+  }
 
-@keyframes vt-fade-out {
-  to {
-    opacity: 0;
+  @keyframes vt-fade-out {
+    to {
+      opacity: 0;
+    }
+  }
+
+  @keyframes vt-fade-in {
+    from {
+      opacity: 0;
+    }
   }
 }
 
-@keyframes vt-fade-in {
-  from {
-    opacity: 0;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -177,7 +192,50 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.list-toolbar-secondary {
+  margin-bottom: 14px;
+}
+
+.search-input {
+  font: inherit;
+  font-size: 14px;
+  color: inherit;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  width: 100%;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+/* Present to assistive tech, invisible to sighted users (announcements,
+   native file input behind a styled label). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 h1 {
