@@ -66,6 +66,9 @@ type Config struct {
 	// embedder gets readable text without configuring anything).
 	LogFormat string
 	LogLevel  string
+	// AllowedNatives is the engine-script capability allowlist (engine
+	// natives like "db.query", "http.post"). nil/empty = unrestricted.
+	AllowedNatives []string
 }
 
 // Run blocks until ctx is cancelled or the listener fails.
@@ -184,6 +187,24 @@ func constantTimeEquals(a, b string) bool {
 	return len(a) == len(b) && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// allowedNativeSet turns the -allow-natives list into the executor's
+// lookup set; an empty list means unrestricted.
+func allowedNativeSet(natives []string) map[string]bool {
+	if len(natives) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(natives))
+	for _, native := range natives {
+		if trimmed := strings.TrimSpace(native); trimmed != "" {
+			set[trimmed] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
 // buildExecutor picks the task execution path: the cortex-engine VM when
 // configured (and actually spawnable), the built-in Go executor otherwise.
 func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
@@ -192,10 +213,11 @@ func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
 		return builtin
 	}
 	engine := &engineexec.Executor{
-		EnginePath: cfg.EnginePath,
-		ScriptPath: cfg.EngineScript,
-		Endpoint:   cfg.SyncEndpoint,
-		Connected:  syncexec.HTTPConnectivity(cfg.SyncEndpoint, 3*time.Second),
+		EnginePath:     cfg.EnginePath,
+		ScriptPath:     cfg.EngineScript,
+		Endpoint:       cfg.SyncEndpoint,
+		Connected:      syncexec.HTTPConnectivity(cfg.SyncEndpoint, 3*time.Second),
+		AllowedNatives: allowedNativeSet(cfg.AllowedNatives),
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

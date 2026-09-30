@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,16 @@ func TestMain(m *testing.M) {
 	case "":
 		os.Exit(m.Run())
 	case "exec-host":
+		if len(os.Args) > 1 && os.Args[1] == "manifest" {
+			// The engine's `manifest` subcommand: emit this fake script's
+			// native-call surface (ENGINEEXEC_FAKE_NATIVES, JSON array).
+			natives := os.Getenv("ENGINEEXEC_FAKE_NATIVES")
+			if natives == "" {
+				natives = `["db.query", "http.post", "net.isConnected"]`
+			}
+			fmt.Println(natives)
+			os.Exit(0)
+		}
 		runFakeEngine()
 		os.Exit(0)
 	case "probe":
@@ -141,6 +152,72 @@ func TestExecuteDrivesScriptThroughHostProtocol(t *testing.T) {
 	if parsed.Exec.Result == nil {
 		t.Fatal("db.exec must be acknowledged by the daemon host")
 	}
+}
+
+func TestExecuteEnforcesTheNativeAllowlist(t *testing.T) {
+	var posts int
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer endpoint.Close()
+
+	body, err := json.Marshal(map[string]any{
+		"entries": []map[string]any{
+			{"id": "n1:create", "kind": "note", "action": "create", "payload": map[string]any{"id": "n1"}, "queuedAt": 42},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	newExecutor := func() *Executor {
+		return &Executor{
+			EnginePath: os.Args[0], // the test binary, re-executed as the fake engine
+			Endpoint:   endpoint.URL,
+			Connected:  func(context.Context) bool { return true },
+		}
+	}
+
+	t.Run("a script exceeding the allowlist is refused before any native fires", func(t *testing.T) {
+		t.Setenv("ENGINEEXEC_FAKE", "exec-host")
+		t.Setenv("ENGINEEXEC_FAKE_NATIVES", `["db.query", "http.post", "net.isConnected"]`)
+		executor := newExecutor()
+		executor.AllowedNatives = map[string]bool{"db.query": true, "net.isConnected": true}
+
+		err := executor.Execute(context.Background(), queue.Task{ID: "t1", Kind: "syncNotes", Body: body})
+		var permanent *queue.PermanentError
+		if !errors.As(err, &permanent) {
+			t.Fatalf("want a permanent error (the same bytes can never pass), got %v", err)
+		}
+		if !strings.Contains(err.Error(), "http.post") {
+			t.Fatalf("the refusal must name the offending native: %v", err)
+		}
+		if posts != 0 {
+			t.Fatalf("no native call may fire from a refused script, got %d posts", posts)
+		}
+	})
+
+	t.Run("a script within the allowlist runs", func(t *testing.T) {
+		t.Setenv("ENGINEEXEC_FAKE", "exec-host")
+		t.Setenv("ENGINEEXEC_FAKE_NATIVES", `["db.query", "net.isConnected"]`)
+		executor := newExecutor()
+		executor.AllowedNatives = map[string]bool{"db.query": true, "net.isConnected": true}
+
+		if err := executor.Execute(context.Background(), queue.Task{ID: "t2", Kind: "syncNotes", Body: body}); err != nil {
+			t.Fatalf("execute within allowlist: %v", err)
+		}
+	})
+
+	t.Run("an unrestricted executor never checks", func(t *testing.T) {
+		t.Setenv("ENGINEEXEC_FAKE", "exec-host")
+		t.Setenv("ENGINEEXEC_FAKE_NATIVES", `["db.query", "http.post", "net.isConnected", "fs.write"]`)
+		executor := newExecutor()
+
+		if err := executor.Execute(context.Background(), queue.Task{ID: "t3", Kind: "syncNotes", Body: body}); err != nil {
+			t.Fatalf("execute unrestricted: %v", err)
+		}
+	})
 }
 
 func TestProbeAcceptsEngineCLI(t *testing.T) {

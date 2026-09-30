@@ -56,25 +56,42 @@ func runDaemon(args []string) {
 	authToken := flag.String("auth-token", orString(file.AuthToken, ""), "require this shared token on /rpc upgrades (query `token` or X-Cortex-Token header); empty = loopback trust")
 	logFormat := flag.String("log-format", orString(file.LogFormat, "text"), "log output format: text or json")
 	logLevel := flag.String("log-level", orString(file.LogLevel, "info"), "log level: debug, info, warn, or error")
+	allowNatives := flag.String("allow-natives", orString(file.AllowNatives, ""), "comma-separated engine natives task scripts may use (e.g. \"db.query,net.isConnected\"); empty = all allowed")
 	flag.CommandLine.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := server.Run(ctx, server.Config{
-		Addr:         *addr,
-		SyncEndpoint: *syncEndpoint,
-		QueuePath:    *queuePath,
-		DataDir:      *dataDir,
-		PollEvery:    *poll,
-		MaxAttempts:  *maxAttempts,
-		EnginePath:   *enginePath,
-		EngineScript: *engineScript,
-		AuthToken:    *authToken,
-		LogFormat:    *logFormat,
-		LogLevel:     *logLevel,
+		Addr:           *addr,
+		SyncEndpoint:   *syncEndpoint,
+		QueuePath:      *queuePath,
+		DataDir:        *dataDir,
+		PollEvery:      *poll,
+		MaxAttempts:    *maxAttempts,
+		EnginePath:     *enginePath,
+		EngineScript:   *engineScript,
+		AuthToken:      *authToken,
+		LogFormat:      *logFormat,
+		LogLevel:       *logLevel,
+		AllowedNatives: splitCSV(*allowNatives),
 	}); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// splitCSV parses a comma-separated flag value into its trimmed parts;
+// empty input yields nil (meaning "unset").
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var parts []string
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
 }
 
 // extractConfigPath finds -config/--config in args before flag parsing (the

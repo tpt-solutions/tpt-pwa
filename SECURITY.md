@@ -53,10 +53,18 @@ files).
   host-provided `NativeEnv`;
 - parser nesting depth (128) and token (100k) caps bound parser/compiler/Drop
   recursion — deep nesting is a rejected parse, not a stack overflow;
-- a hard instruction budget bounds every loop;
-- data errors (index range, integer overflow, NaN ordering) are distinct
-  error values; the CLI exits 2 for permanent (parse/compile) failures so the
-  daemon stops retrying them.
+- a hard instruction budget bounds every loop, and a 128-frame call-depth
+  cap bounds recursion memory;
+- data errors (index range, integer overflow, division by zero, NaN
+  ordering) are distinct error values; the CLI exits 2 for permanent
+  (parse/compile) failures so the daemon stops retrying them.
+
+**Capability manifests**: before a task script executes a single native
+call, the daemon asks the engine for its static native surface
+(`cortex-engine manifest`) and checks it against `-allow-natives` (unset =
+all allowed). A script exceeding the allowlist parks as permanently failed
+without any effect firing — and because the manifest is a full compile,
+only scripts that would actually run can declare capabilities at all.
 
 ### 4. Sync payloads
 

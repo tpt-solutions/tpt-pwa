@@ -27,6 +27,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
@@ -63,6 +65,12 @@ type Executor struct {
 	Connected Connectivity
 	// Client performs http.post calls; defaults to http.DefaultClient.
 	Client *http.Client
+	// AllowedNatives is the capability allowlist for task scripts, matched
+	// against the engine's static `manifest` of the script (e.g.
+	// "db.query", "http.post"). nil = unrestricted (every script runs).
+	// A script using a native outside the allowlist parks as failed
+	// (permanent) WITHOUT executing a single native call.
+	AllowedNatives map[string]bool
 }
 
 // Probe verifies the engine binary can be spawned (cheap exec smoke test).
@@ -80,6 +88,55 @@ func (e *Executor) Probe(ctx context.Context) error {
 	return fmt.Errorf("spawn %s: %w", e.EnginePath, err)
 }
 
+// manifest asks the engine for the script's static native-call surface
+// (`cortex-engine manifest --script <file>`: a JSON array like
+// ["db.query","http.post"]). The script is fully compiled by the engine in
+// the process, so a manifest only exists for scripts that would actually run.
+func (e *Executor) manifest(ctx context.Context, script string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, e.EnginePath, "manifest", "--script", script)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("engine manifest: %w (stderr: %s)", err, stderr.String())
+	}
+	var natives []string
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &natives); err != nil {
+		return nil, fmt.Errorf("engine manifest output %q: %w", stdout.String(), err)
+	}
+	return natives, nil
+}
+
+// enforceNatives refuses scripts whose capability surface exceeds the
+// operator's allowlist — permanently: the same bytes can never pass.
+func (e *Executor) enforceNatives(natives []string) error {
+	if e.AllowedNatives == nil {
+		return nil
+	}
+	var forbidden []string
+	for _, native := range natives {
+		if !e.AllowedNatives[native] {
+			forbidden = append(forbidden, native)
+		}
+	}
+	if len(forbidden) > 0 {
+		return &queue.PermanentError{
+			Err: fmt.Errorf("script uses natives outside -allow-natives: %s (allowed: %s)",
+				strings.Join(forbidden, ", "), strings.Join(sortedKeys(e.AllowedNatives), ", ")),
+		}
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // Execute implements scheduler.Executor.
 func (e *Executor) Execute(ctx context.Context, task queue.Task) error {
 	if e.EnginePath == "" {
@@ -90,6 +147,16 @@ func (e *Executor) Execute(ctx context.Context, task queue.Task) error {
 		return err
 	}
 	defer cleanup()
+
+	// Capability gate BEFORE anything executes: no native call fires from a
+	// script the operator has not authorized.
+	natives, err := e.manifest(ctx, script)
+	if err != nil {
+		return err
+	}
+	if err := e.enforceNatives(natives); err != nil {
+		return err
+	}
 
 	cmd := exec.CommandContext(ctx, e.EnginePath, "exec-host", "--script", script)
 	stdin, err := cmd.StdinPipe()

@@ -7,6 +7,11 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Capability manifests: `cortex-engine manifest` prints a script's static
+  native-call surface as JSON, and the daemon's `-allow-natives` enforces it
+  before any task executes — scripts exceeding the allowlist park as
+  permanently failed without a single native call firing (also settable via
+  the config file's `allow-natives` key).
 - Deterministic replay: `cortex-engine exec-host --record` (and `run
   --record`) write JSONL traces of every native call plus the final
   outcome; `cortex-engine replay` re-runs a script against a trace with no

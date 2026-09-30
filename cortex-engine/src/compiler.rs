@@ -39,71 +39,29 @@ pub fn resolve_native(path: &[String]) -> Option<NativeId> {
 
 pub fn compile(task: &Task) -> Result<Program, CompileError> {
     let mut compiler = Compiler::default();
-    // Function names resolve before anything compiles so calls may reference
-    // functions declared later (mutual recursion included).
-    for (index, function) in task.functions.iter().enumerate() {
-        if compiler
-            .functions
-            .insert(function.name.clone(), index)
-            .is_some()
-        {
-            return Err(CompileError {
-                message: format!("duplicate function `{}`", function.name),
-            });
-        }
-        compiler
-            .arities
-            .insert(function.name.clone(), function.params.len());
-    }
-
-    // Main body first (locals counted from 0).
-    compiler.enter();
-    compiler.stmts(&task.body)?;
-    compiler.emit(Instr::Return);
-    let main_locals = compiler.locals;
-
-    // Function bodies flatten after the main body; each starts with a fresh
-    // flat scope (params at slots 0..n) and its own local count.
-    let mut functions = Vec::new();
-    for function in &task.functions {
-        let start = compiler.offset(compiler.code.len())?;
-        let mut seen = std::collections::BTreeSet::new();
-        for param in &function.params {
-            if !seen.insert(param.clone()) {
-                return Err(CompileError {
-                    message: format!(
-                        "duplicate parameter `{param}` in function `{}`",
-                        function.name
-                    ),
-                });
-            }
-        }
-        compiler.reset_scope();
-        compiler.enter();
-        for param in &function.params {
-            compiler.declare(param)?;
-        }
-        compiler.stmts(&function.body)?;
-        // Falling off the end returns null, like `return;`.
-        let null = compiler.constant(Value::Null)?;
-        compiler.emit(Instr::Const(null));
-        compiler.emit(Instr::Return);
-        functions.push(FunctionInfo {
-            name: function.name.clone(),
-            start,
-            params: u8::try_from(function.params.len()).map_err(|_| CompileError {
-                message: format!("function `{}` has too many parameters", function.name),
-            })?,
-            locals: compiler.locals,
-        });
-    }
-
+    compiler.prepare(task)?;
+    compiler.emit_task(task)?;
     Ok(Program {
         constants: compiler.constants,
         code: compiler.code,
-        functions,
-        locals: main_locals,
+        functions: compiler.manifest_fns,
+        locals: compiler.main_locals,
     })
+}
+
+/// The natives a task uses (`["db.query", "http.post", …]`, sorted,
+/// deduplicated). Compiles the task first, so a script that would not run at
+/// all never yields a manifest, and unknown natives surface here exactly as
+/// they would at compile time. Hosts (the daemon's `-allow-natives`) use
+/// this as the script's capability declaration.
+pub fn manifest(task: &Task) -> Result<Vec<String>, CompileError> {
+    let mut compiler = Compiler::default();
+    compiler.prepare(task)?;
+    compiler.emit_task(task)?;
+    let mut natives = compiler.used_natives;
+    natives.sort();
+    natives.dedup();
+    Ok(natives)
 }
 
 #[derive(Default)]
@@ -116,9 +74,77 @@ struct Compiler {
     /// (bytecode `FunctionInfo` gets its start offset when bodies compile).
     functions: BTreeMap<String, usize>,
     arities: BTreeMap<String, usize>,
+    /// Every `native.x.y` path the task calls, in first-use order
+    /// (`manifest()` sorts and dedupes).
+    used_natives: Vec<String>,
+    /// Populated by `emit_task` for `compile` to hand to the Program.
+    manifest_fns: Vec<FunctionInfo>,
+    main_locals: u16,
 }
 
 impl Compiler {
+    /// Resolve the task's function table before any body compiles so calls
+    /// may reference functions declared later (mutual recursion included).
+    fn prepare(&mut self, task: &Task) -> Result<(), CompileError> {
+        for (index, function) in task.functions.iter().enumerate() {
+            if self
+                .functions
+                .insert(function.name.clone(), index)
+                .is_some()
+            {
+                return Err(CompileError {
+                    message: format!("duplicate function `{}`", function.name),
+                });
+            }
+            self.arities
+                .insert(function.name.clone(), function.params.len());
+        }
+        Ok(())
+    }
+
+    /// Compile the main body, then each function body flattened after it.
+    fn emit_task(&mut self, task: &Task) -> Result<(), CompileError> {
+        // Main body first (locals counted from 0).
+        self.enter();
+        self.stmts(&task.body)?;
+        self.emit(Instr::Return);
+        self.main_locals = self.locals;
+
+        for function in &task.functions {
+            let start = self.offset(self.code.len())?;
+            let mut seen = std::collections::BTreeSet::new();
+            for param in &function.params {
+                if !seen.insert(param.clone()) {
+                    return Err(CompileError {
+                        message: format!(
+                            "duplicate parameter `{param}` in function `{}`",
+                            function.name
+                        ),
+                    });
+                }
+            }
+            self.reset_scope();
+            self.enter();
+            for param in &function.params {
+                self.declare(param)?;
+            }
+            self.stmts(&function.body)?;
+            // Falling off the end returns null, like `return;`.
+            let null = self.constant(Value::Null)?;
+            self.emit(Instr::Const(null));
+            self.emit(Instr::Return);
+            self.manifest_fns.push(FunctionInfo {
+                name: function.name.clone(),
+                start,
+                params: u8::try_from(function.params.len()).map_err(|_| CompileError {
+                    message: format!("function `{}` has too many parameters", function.name),
+                })?,
+                locals: self.locals,
+            });
+        }
+        Ok(())
+    }
+
     fn emit(&mut self, instr: Instr) {
         self.code.push(instr);
     }
@@ -367,6 +393,11 @@ impl Compiler {
                     if let Some(mut path) = flatten_member_chain(object) {
                         path.push(field.clone());
                         if let Some(native) = resolve_native(&path) {
+                            // Record the capability name the host protocol
+                            // uses ("db.query"), not the source spelling
+                            // ("native.db.query") -- the daemon's
+                            // -allow-natives speaks this form.
+                            self.used_natives.push(path[1..].join("."));
                             let argc = u8::try_from(args.len()).map_err(|_| CompileError {
                                 message: "too many arguments".into(),
                             })?;
@@ -568,6 +599,51 @@ mod tests {
         assert!(compile(&bad).is_err());
         let bare = parse_task("task t() -> void { let f = native.db.query; }").expect("parses");
         assert!(compile(&bare).is_err());
+    }
+
+    #[test]
+    fn manifest_collects_every_native_from_main_and_functions() {
+        let task = parse_task(
+            r#"
+            task t() -> void {
+                fn probe() {
+                    return native.net.isConnected();
+                }
+                fn push(row) {
+                    return native.http.post(row.endpoint, row);
+                }
+                let rows = native.db.query("SELECT 1");
+                if probe() {
+                    for row in rows {
+                        push(row);
+                    }
+                }
+            }
+        "#,
+        )
+        .expect("parses");
+        assert_eq!(
+            manifest(&task).expect("manifests"),
+            vec![
+                "db.query".to_string(),
+                "http.post".to_string(),
+                "net.isConnected".to_string()
+            ]
+        );
+        // Natives reached only on untaken branches still declare: the
+        // manifest is static, not a trace.
+        let task = parse_task("task t() -> void { if false { native.http.post(\"x\", 1); } }")
+            .expect("parses");
+        assert_eq!(
+            manifest(&task).expect("manifests"),
+            vec!["http.post".to_string()]
+        );
+        // A task that would not compile yields no manifest at all.
+        let bad = parse_task("task t() -> void { native.db.dropAll(); }").expect("parses");
+        assert!(manifest(&bad).is_err());
+        // A task with zero natives manifests as empty (still allowed to run).
+        let pure = parse_task("task t() -> void { return 1 + 1; }").expect("parses");
+        assert_eq!(manifest(&pure).expect("manifests"), Vec::<String>::new());
     }
 }
 

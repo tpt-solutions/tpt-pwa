@@ -86,6 +86,7 @@ With both running, the app's header chip flips to **cortex connected** and notes
 | `-data-dir` | OS config dir | Sandbox root for `fs.write` |
 | `-poll` / `-max-attempts` | `5s` / `8` | Scheduler cadence and retry ceiling |
 | `-log-format` / `-log-level` | `text` / `info` | `json` emits one parseable object per line (levels, `component` attrs) for systemd/Docker scraping |
+| `-allow-natives` | _(unset = all)_ | Capability allowlist for engine task scripts (e.g. `"db.query,net.isConnected"`); a script whose static manifest exceeds it parks as failed without executing any native call |
 | `-config` | _(unset)_ | JSON config file; keys mirror the flags (`{"addr": "127.0.0.1:9911", "log-format": "json", ...}`), every explicit flag overrides it, unknown keys are rejected |
 
 There is no `.env` indirection on purpose: the daemon is flag-driven with an optional JSON config file for persistence (see `go run ./cortex-daemon/cmd/cortex-daemon -h`) and the PWA needs no configuration. If you put `-auth-token` in a config file, protect it like a secret (file permissions, not in a repo).

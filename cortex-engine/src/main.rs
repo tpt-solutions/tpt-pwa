@@ -41,9 +41,52 @@ fn main() -> ExitCode {
         "run" => run_command(args.next().as_deref(), args),
         "exec-host" => exec_host_command(args),
         "replay" => replay_command(args.next().as_deref(), args),
+        "manifest" => manifest_command(args),
         other => {
-            eprintln!("unknown command `{other}` (expected `run`, `exec-host`, or `replay`)");
+            eprintln!(
+                "unknown command `{other}` (expected `run`, `exec-host`, `replay`, or `manifest`)"
+            );
             ExitCode::from(EXIT_PERMANENT)
+        }
+    }
+}
+
+/// `manifest`: print the task's native-call surface as a sorted JSON array
+/// (the capability declaration hosts can enforce, e.g. the daemon's
+/// `-allow-natives`). Exit 2 for anything that would not compile.
+fn manifest_command(mut args: std::iter::Skip<std::env::Args>) -> ExitCode {
+    let mut path: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--script" => path = args.next(),
+            // Positional form too: `manifest sync.ctx` == `manifest --script sync.ctx`.
+            other if path.is_none() && !other.starts_with("--") => path = Some(other.to_string()),
+            other => {
+                eprintln!("manifest: unexpected argument `{other}`");
+                return ExitCode::from(EXIT_PERMANENT);
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: cortex-engine manifest <script.ctx>");
+        return ExitCode::from(EXIT_PERMANENT);
+    };
+    let Ok(source) = std::fs::read_to_string(&path) else {
+        eprintln!("manifest: cannot read {path}");
+        return ExitCode::from(EXIT_PERMANENT);
+    };
+    match cortex_engine::parser::parse_task(&source)
+        .map_err(cortex_engine::EngineError::Parse)
+        .and_then(|task| {
+            cortex_engine::compiler::manifest(&task).map_err(cortex_engine::EngineError::Compile)
+        }) {
+        Ok(natives) => {
+            println!("{}", serde_json::json!(natives));
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("manifest: {err}");
+            ExitCode::from(exit_code_for(&err))
         }
     }
 }

@@ -32,6 +32,7 @@ type File struct {
 	AuthToken    string `json:"auth-token"`
 	LogFormat    string `json:"log-format"`
 	LogLevel     string `json:"log-level"`
+	AllowNatives string `json:"allow-natives"`
 }
 
 // Load reads and validates a config file. Values are checked here — not
