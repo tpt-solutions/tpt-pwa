@@ -7,6 +7,13 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Real SQL for task scripts: `native.db.query`/`native.db.exec` execute
+  against the daemon's SQLite database (`internal/taskdb`,
+  modernc.org/sqlite — pure Go, no cgo; `<data-dir>/cortex.db`, WAL,
+  durable across restarts). The sync script's outbox view moved to a
+  dedicated `native.outbox.entries()` and the embedded sync.ctx migrated;
+  a real-engine + real-SQLite round-trip test proves the protocol end to
+  end.
 - `.ctx` playground in the PWA: the cortex-engine VM compiled to WebAssembly
   (`cortex-engine-wasm` crate, wasm-pack artifact committed and
   CI-checked), reachable from a header button. Scripts run against a

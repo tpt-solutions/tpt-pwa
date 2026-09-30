@@ -167,6 +167,9 @@ fn hostile_native_implementations_return_errors_not_panics() {
         fn http_post(&mut self, _: &str, _: &Value) -> Result<Value, String> {
             Err("tls handshake failed".into())
         }
+        fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+            Err("outbox unavailable".into())
+        }
     }
     let source = r#"
         task allFail() -> void {

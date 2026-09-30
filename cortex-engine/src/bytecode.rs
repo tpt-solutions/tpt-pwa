@@ -12,6 +12,10 @@ pub enum NativeId {
     DbExec,
     NetIsConnected,
     HttpPost,
+    /// The task's outbox entries — the sync script's data source (the
+    /// daemon injects them per task). Distinct from `db.query`, which is a
+    /// real SQL query against the daemon's database.
+    OutboxEntries,
 }
 
 #[derive(Clone, Debug, PartialEq)]

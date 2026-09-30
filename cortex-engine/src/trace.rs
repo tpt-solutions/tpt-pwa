@@ -38,6 +38,7 @@ pub mod method {
     pub const DB_EXEC: &str = "db.exec";
     pub const NET_IS_CONNECTED: &str = "net.isConnected";
     pub const HTTP_POST: &str = "http.post";
+    pub const OUTBOX_ENTRIES: &str = "outbox.entries";
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,6 +185,17 @@ where
             outcome,
         )
     }
+
+    fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+        let outcome = self
+            .inner
+            .outbox_entries()
+            .map(|rows| Value::List(std::rc::Rc::new(rows)));
+        match self.record(method::OUTBOX_ENTRIES, &[], outcome)? {
+            Value::List(rows) => Ok((*rows).clone()),
+            _ => Err("recorder stored a non-list outbox result".to_string()),
+        }
+    }
 }
 
 /// Answers native calls from a recorded trace. Divergence of any kind is an
@@ -307,6 +319,17 @@ impl NativeEnv for ReplayNative {
             &[Value::Str(url.to_string()), body.clone()],
         )? {
             Ok(value) => Ok(value),
+            Err(message) => Err(message),
+        }
+    }
+
+    fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+        match self.next_answer(method::OUTBOX_ENTRIES, &[])? {
+            Ok(Value::List(rows)) => Ok((*rows).clone()),
+            Ok(other) => Err(format!(
+                "trace outbox result is {}, expected list",
+                other.type_name()
+            )),
             Err(message) => Err(message),
         }
     }

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/taskdb"
 )
 
 // TestMain doubles as the fake cortex-engine binary: when re-executed with
@@ -66,7 +67,7 @@ func runFakeEngine() {
 		return response
 	}
 
-	rows := call(1, "db.query", "SELECT * FROM outbox WHERE status = 'pending'")
+	rows := call(1, "outbox.entries")
 	connected := call(2, "net.isConnected")
 	if connected["error"] != nil {
 		os.Exit(1)
@@ -79,7 +80,6 @@ func runFakeEngine() {
 				endpoint = ep
 			}
 			call(3, "http.post", endpoint, row)
-			call(4, "db.exec", "UPDATE outbox SET status = 'synced' WHERE id = ?", row["id"])
 		}
 	}
 
@@ -89,7 +89,6 @@ func runFakeEngine() {
 			"rows":      rows["result"],
 			"connected": connected["result"],
 			"post":      responses[3],
-			"exec":      responses[4],
 		})
 		os.WriteFile(logPath, summary, 0o644)
 	}
@@ -133,9 +132,6 @@ func TestExecuteDrivesScriptThroughHostProtocol(t *testing.T) {
 	}
 	var parsed struct {
 		Rows []map[string]any `json:"rows"`
-		Exec struct {
-			Result any `json:"result"`
-		} `json:"exec"`
 	}
 	if err := json.Unmarshal(summary, &parsed); err != nil {
 		t.Fatalf("decode log %s: %v", summary, err)
@@ -149,8 +145,67 @@ func TestExecuteDrivesScriptThroughHostProtocol(t *testing.T) {
 	if len(received) != 1 || !strings.Contains(string(received[0]), `"n1"`) {
 		t.Fatalf("http.post must reach the endpoint with the row payload, got %s", received)
 	}
-	if parsed.Exec.Result == nil {
-		t.Fatal("db.exec must be acknowledged by the daemon host")
+}
+
+// The host side of db.*: outbox.entries serves the task's rows, and
+// db.exec/db.query reach the configured SQLite database (the real engine
+// e2e below proves the same through an actual Rust VM).
+func TestExecuteServesOutboxEntriesAndRealSQL(t *testing.T) {
+	db, err := taskdb.Open(filepath.Join(t.TempDir(), "cortex.db"))
+	if err != nil {
+		t.Fatalf("open taskdb: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, "CREATE TABLE markers (id TEXT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	executor := &Executor{
+		EnginePath: os.Args[0],
+		DB:         db,
+	}
+	task := queue.Task{
+		ID:   "t1",
+		Kind: "syncNotes",
+		Body: json.RawMessage(`{"entries":[{"id":"n1:create","endpoint":"https://x"}]}`),
+	}
+	requests := []protocolRequest{
+		{ID: 1, Method: "outbox.entries"},
+		{ID: 2, Method: "db.exec", Params: []json.RawMessage{
+			json.RawMessage(`"INSERT INTO markers (id) VALUES (?)"`),
+			json.RawMessage(`"n9"`),
+		}},
+		{ID: 3, Method: "db.query", Params: []json.RawMessage{
+			json.RawMessage(`"SELECT id FROM markers"`),
+		}},
+	}
+
+	for _, request := range requests {
+		response := executor.respond(ctx, task, request)
+		if response.Error != "" {
+			t.Fatalf("%s failed: %s", request.Method, response.Error)
+		}
+		switch request.Method {
+		case "outbox.entries":
+			var rows []map[string]any
+			if err := json.Unmarshal(response.Result, &rows); err != nil || len(rows) != 1 {
+				t.Fatalf("outbox.entries: %s (%v)", response.Result, err)
+			}
+			if rows[0]["id"] != "n1:create" {
+				t.Fatalf("outbox row: %v", rows[0])
+			}
+		case "db.exec":
+			var affected float64
+			if err := json.Unmarshal(response.Result, &affected); err != nil || affected != 1 {
+				t.Fatalf("db.exec affected: %s (%v)", response.Result, err)
+			}
+		case "db.query":
+			var rows []map[string]any
+			if err := json.Unmarshal(response.Result, &rows); err != nil || len(rows) != 1 || rows[0]["id"] != "n9" {
+				t.Fatalf("db.query rows: %s (%v)", response.Result, err)
+			}
+		}
 	}
 }
 
@@ -278,5 +333,51 @@ func TestExecuteAgainstRealEngine(t *testing.T) {
 	}
 	if posts[0]["action"] != "create" {
 		t.Fatalf("unexpected posted row: %v", posts[0])
+	}
+}
+
+// Proves the real engine drives db.* against a real SQLite file end to end:
+// the script writes and reads through the stdio protocol, the database
+// persists the effect.
+func TestExecuteAgainstRealEngineRunsRealSQL(t *testing.T) {
+	engineBin := os.Getenv("CORTEX_ENGINE_BIN")
+	if engineBin == "" {
+		t.Skip("CORTEX_ENGINE_BIN not set; protocol covered by the fake-engine test")
+	}
+
+	db, err := taskdb.Open(filepath.Join(t.TempDir(), "cortex.db"))
+	if err != nil {
+		t.Fatalf("open taskdb: %v", err)
+	}
+	defer db.Close()
+
+	const script = `
+task sqlRoundTrip() -> void {
+    native.db.exec("CREATE TABLE IF NOT EXISTS visits (page TEXT, at INTEGER)");
+    native.db.exec("INSERT INTO visits VALUES (?, ?)", "home", 42);
+    let rows = native.db.query("SELECT page, at FROM visits");
+    return rows[0].page;
+}
+`
+	scriptPath := filepath.Join(t.TempDir(), "sql-round-trip.ctx")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	executor := &Executor{
+		EnginePath: engineBin,
+		ScriptPath: scriptPath,
+		DB:         db,
+	}
+	if err := executor.Execute(context.Background(), queue.Task{ID: "t-sql", Kind: "syncNotes"}); err != nil {
+		t.Fatalf("real engine sql execute: %v", err)
+	}
+
+	rows, err := db.Query(context.Background(), "SELECT page, at FROM visits")
+	if err != nil {
+		t.Fatalf("verify query: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["page"] != "home" {
+		t.Fatalf("the script's insert must persist: %v", rows)
 	}
 }

@@ -5,9 +5,12 @@
 // "host" side of the stdio protocol (src/host.rs in cortex-engine), serving
 // the script's native.* calls with real daemon effects:
 //
-//	db.query          -> the task's outbox entries, one row each
-//	                     (plus the configured sync endpoint per row)
-//	db.exec           -> acknowledged (bookkeeping count)
+//	db.query          -> real SQL over the daemon's SQLite database
+//	                     (internal/taskdb, persisted in the data dir)
+//	db.exec           -> real SQL write; returns the affected row count
+//	outbox.entries    -> the task's outbox entries, one row each
+//	                     (plus the configured sync endpoint per row) -- the
+//	                     sync script's data source
 //	net.isConnected   -> the scheduler's connectivity probe
 //	http.post         -> a real HTTP POST from the daemon process
 //
@@ -32,6 +35,7 @@ import (
 	"time"
 
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/queue"
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/taskdb"
 )
 
 //go:embed sync.ctx
@@ -71,6 +75,10 @@ type Executor struct {
 	// A script using a native outside the allowlist parks as failed
 	// (permanent) WITHOUT executing a single native call.
 	AllowedNatives map[string]bool
+	// DB backs native.db.query/exec as a real SQL surface: a SQLite
+	// database in the daemon's data dir (internal/taskdb). nil = the db
+	// natives fail at runtime with a clear error (the daemon still runs).
+	DB *taskdb.DB
 }
 
 // Probe verifies the engine binary can be spawned (cheap exec smoke test).
@@ -231,11 +239,21 @@ func (e *Executor) respond(ctx context.Context, task queue.Task, request protoco
 func (e *Executor) handle(ctx context.Context, task queue.Task, request protocolRequest) (any, error) {
 	switch request.Method {
 	case "db.query":
-		return e.rowsFor(task), nil
+		sql, args, err := sqlParams(request.Params)
+		if err != nil {
+			return nil, err
+		}
+		return e.DB.Query(ctx, sql, args...)
 	case "db.exec":
-		// Row mutations are bookkeeping for the daemon (the outbox entry is
-		// cleared when the whole task completes); acknowledge success.
-		return 1, nil
+		sql, args, err := sqlParams(request.Params)
+		if err != nil {
+			return nil, err
+		}
+		return e.DB.Exec(ctx, sql, args...)
+	case "outbox.entries":
+		// The sync script's data source: this task's outbox entries (the
+		// daemon clears them itself when the whole task completes).
+		return e.rowsFor(task), nil
 	case "net.isConnected":
 		if e.Connected == nil {
 			return true, nil
@@ -257,6 +275,27 @@ func (e *Executor) handle(ctx context.Context, task queue.Task, request protocol
 	default:
 		return nil, fmt.Errorf("unknown native %q", request.Method)
 	}
+}
+
+// sqlParams decodes the db.* calling convention: params[0] is the SQL
+// string, the rest are positional binds.
+func sqlParams(params []json.RawMessage) (string, []any, error) {
+	if len(params) < 1 {
+		return "", nil, errors.New("db.* needs an SQL string")
+	}
+	var sql string
+	if err := json.Unmarshal(params[0], &sql); err != nil {
+		return "", nil, fmt.Errorf("db.* sql: %w", err)
+	}
+	args := make([]any, 0, len(params)-1)
+	for i, raw := range params[1:] {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return "", nil, fmt.Errorf("db.* bind %d: %w", i+1, err)
+		}
+		args = append(args, value)
+	}
+	return sql, args, nil
 }
 
 // post performs the script's HTTP effect from the daemon process. The body

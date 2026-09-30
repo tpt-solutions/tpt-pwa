@@ -123,6 +123,9 @@ fn recorded_errors_replay_as_the_same_failure() {
         fn http_post(&mut self, _: &str, _: &Value) -> Result<Value, String> {
             Err("tls handshake failed".into())
         }
+        fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+            Err("outbox unavailable".into())
+        }
     }
     let mut recording = Vec::new();
     {

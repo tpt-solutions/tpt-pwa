@@ -145,6 +145,16 @@ impl<In: BufRead, Out: Write> NativeEnv for HostNative<In, Out> {
         }
     }
 
+    fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+        match self.call("outbox.entries", &[])? {
+            Value::List(rows) => Ok((*rows).clone()),
+            other => Err(format!(
+                "outbox.entries returned {}, expected list",
+                other.type_name()
+            )),
+        }
+    }
+
     fn http_post(&mut self, url: &str, body: &Value) -> Result<Value, String> {
         self.call("http.post", &[Value::Str(url.to_string()), body.clone()])
     }

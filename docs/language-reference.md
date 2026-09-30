@@ -14,7 +14,7 @@ task sync_notes() -> void {
     fn push(row) {
         return native.http.post(row.endpoint, row);
     }
-    let rows = native.db.query("SELECT id, action, payload FROM outbox");
+    let rows = native.outbox.entries();
     if !native.net.isConnected() {
         return;
     }
@@ -26,8 +26,8 @@ task sync_notes() -> void {
 
 - `task <name>() -> void { … }` — the only top-level form. The parameter
   list is empty by design: tasks receive their inputs through
-  `native.db.query` (today: the task's own outbox entries; see
-  [jsonrpc-contract.md](jsonrpc-contract.md)).
+  `native.outbox.entries()` (the daemon injects the task's own outbox
+  entries; see [jsonrpc-contract.md](jsonrpc-contract.md)).
 - `fn name(params) { … }` — declared **only at the top of the task body**.
   Functions close over nothing: they see their parameters, their own
   locals, and other functions (declared before or after — mutual recursion
@@ -63,8 +63,9 @@ task sync_notes() -> void {
 | `a == b` `a != b` | Equality |
 | `a < b` `a <= b` `a > b` `a >= b` | Ordering — numbers compare exactly across int/float; **NaN comparisons are errors** |
 | `a && b` `a || b` | **Short-circuit** — the right side (including its native calls) does not run when the left decides |
-| `native.db.query(sql, params…)` | → list of row maps |
-| `native.db.exec(sql, params…)` | → affected count |
+| `native.db.query(sql, params…)` | → list of row maps — real SQL over the daemon's SQLite database (`<data-dir>/cortex.db`), durable across restarts |
+| `native.db.exec(sql, params…)` | → affected row count (same database) |
+| `native.outbox.entries()` | → the task's outbox entries, one row each with its `endpoint` — the sync script's data source |
 | `native.net.isConnected()` | → bool |
 | `native.http.post(url, body)` | → status code; non-2xx is a runtime error |
 

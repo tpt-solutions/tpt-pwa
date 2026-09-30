@@ -27,6 +27,7 @@ import (
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/rpc"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/scheduler"
 	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/syncexec"
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/taskdb"
 )
 
 // Version is the daemon's reported identity (cortex.ping).
@@ -89,11 +90,22 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("open queue: %w", err)
 	}
 
+	// The task scripts' SQL surface: one SQLite file in the data dir.
+	// Best-effort at boot — a failure degrades db.* natives (they fail at
+	// runtime with a clear message) but never blocks sync-only tasks.
+	taskDB, dbErr := openTaskDB(cfg.DataDir)
+	if dbErr != nil {
+		slog.Warn("task database unavailable; db.* natives will fail", "component", "server", "error", dbErr)
+	}
+	if taskDB != nil {
+		defer taskDB.Close()
+	}
+
 	broker := rpc.NewBroker()
 	stats := newTaskStats()
 	sched := &scheduler.Scheduler{
 		Queue:       taskQueue,
-		Executor:    buildExecutor(ctx, cfg),
+		Executor:    buildExecutor(ctx, cfg, taskDB),
 		Connected:   syncexec.HTTPConnectivity(cfg.SyncEndpoint, 3*time.Second),
 		PollEvery:   cfg.PollEvery,
 		MaxAttempts: cfg.MaxAttempts,
@@ -205,9 +217,22 @@ func allowedNativeSet(natives []string) map[string]bool {
 	return set
 }
 
+// openTaskDB opens (creating if needed) the scripts' SQLite database at
+// <data-dir>/cortex.db.
+func openTaskDB(dataDir string) (*taskdb.DB, error) {
+	dir := dataDir
+	if dir == "" {
+		dir = "data"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("data dir: %w", err)
+	}
+	return taskdb.Open(filepath.Join(dir, "cortex.db"))
+}
+
 // buildExecutor picks the task execution path: the cortex-engine VM when
 // configured (and actually spawnable), the built-in Go executor otherwise.
-func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
+func buildExecutor(ctx context.Context, cfg Config, taskDB *taskdb.DB) scheduler.Executor {
 	builtin := &syncexec.SyncExecutor{Endpoint: cfg.SyncEndpoint}
 	if cfg.EnginePath == "" {
 		return builtin
@@ -218,6 +243,7 @@ func buildExecutor(ctx context.Context, cfg Config) scheduler.Executor {
 		Endpoint:       cfg.SyncEndpoint,
 		Connected:      syncexec.HTTPConnectivity(cfg.SyncEndpoint, 3*time.Second),
 		AllowedNatives: allowedNativeSet(cfg.AllowedNatives),
+		DB:             taskDB,
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

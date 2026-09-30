@@ -1,12 +1,16 @@
-// The background-sync task from spec §6, verbatim. Executed by
+// The background-sync task from spec §6. Executed by
 // `cortex-engine run examples/sync.ctx`; exercised end-to-end by the test
-// suite (tests/sync_ctx.rs).
+// suite (tests/sync_ctx.rs). The daemon's embedded copy
+// (cortex-daemon/internal/engineexec/sync.ctx) mirrors this one — keep both
+// in sync. The host injects the task's outbox entries via
+// `native.outbox.entries()`; each entry carries its `endpoint` (the
+// configured sync endpoint). Clearing entries is bookkeeping the daemon
+// performs when the task completes — the script only pushes.
 task syncOfflineData() -> void {
-    let pending = native.db.query("SELECT * FROM queue WHERE status = 'pending'");
+    let pending = native.outbox.entries();
     if native.net.isConnected() {
         for item in pending {
-            native.http.post("https://api.tpt/sync", item);
-            native.db.exec("UPDATE queue SET status = 'synced' WHERE id = ?", item.id);
+            native.http.post(item.endpoint, item);
         }
     }
 }

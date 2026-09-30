@@ -20,8 +20,9 @@ Flags: `-addr` (default `127.0.0.1:9911`), `-sync-endpoint`, `-poll`, `-max-atte
 | `internal/rpc` | JSON-RPC 2.0 over WebSocket; strict param validation; broadcast broker for `cortex.event.*` notifications |
 | `internal/scheduler` | Drains due tasks whenever the network is up; the PWA can be closed the whole time |
 | `internal/syncexec` | Built-in Go executor for `syncNotes` tasks (native twin of the PWA's browser-side flush, spec §4) |
-| `internal/engineexec` | Optional executor that runs tasks through the **cortex-engine VM**: the Rust binary executes the DSL script and `native.*` calls round-trip over a line-delimited JSON protocol on stdio (`db.query` serves the task's outbox rows, `net.isConnected` uses the scheduler's probe, `http.post` performs a real POST from the daemon). With `-engine` unset (or a missing binary) the built-in executor is used, so the daemon degrades gracefully. |
+| `internal/engineexec` | Optional executor that runs tasks through the **cortex-engine VM**: the Rust binary executes the DSL script and `native.*` calls round-trip over a line-delimited JSON protocol on stdio (`db.query`/`db.exec` are real SQL over the daemon's SQLite database in the data dir, `outbox.entries` serves the task's outbox rows, `net.isConnected` uses the scheduler's probe, `http.post` performs a real POST from the daemon). With `-engine` unset (or a missing binary) the built-in executor is used, so the daemon degrades gracefully. |
 | `internal/server` | One assembly point (queue + broker + scheduler + handlers + fs sandbox) shared by the CLI and the mobile binding |
+| `internal/taskdb` | The scripts' SQL surface: SQLite (pure Go, no cgo) at `<data-dir>/cortex.db`, WAL mode, durable across restarts |
 | `mobile/` | gomobile-bindable façade (`Mobile.start/stop`) for embedding in cortex-android's `DaemonService` |
 
 ## Security notes

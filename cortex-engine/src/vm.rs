@@ -505,6 +505,10 @@ impl<'env> Vm<'env> {
             NativeId::NetIsConnected => {
                 Value::Bool(self.env.net_is_connected().map_err(VmError::Native)?)
             }
+            NativeId::OutboxEntries => {
+                let rows = self.env.outbox_entries().map_err(VmError::Native)?;
+                Value::List(Rc::new(rows))
+            }
             NativeId::HttpPost => {
                 let mut iter = args.into_iter();
                 let url = match iter.next() {

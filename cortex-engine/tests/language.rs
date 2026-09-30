@@ -329,3 +329,20 @@ fn function_misuse_is_rejected_at_compile_time() {
     let err = run("task t() -> void { fn outer() { fn inner() { } } return 1; }").unwrap_err();
     assert!(matches!(err, EngineError::Parse(_)), "got: {err:?}");
 }
+
+#[test]
+fn outbox_entries_is_a_first_class_native() {
+    let source = r#"
+        task t() -> void {
+            let pending = native.outbox.entries();
+            let count = 0;
+            for item in pending {
+                count = count + 1;
+            }
+            return count;
+        }
+    "#;
+    // The wasm playground and the daemon host both answer outbox.entries;
+    // through MemoryNative it is its own row set (empty here).
+    assert_eq!(run(source).unwrap(), Value::Int(0));
+}

@@ -31,6 +31,7 @@ pub fn resolve_native(path: &[String]) -> Option<NativeId> {
             ("db", "exec") => Some(NativeId::DbExec),
             ("net", "isConnected") => Some(NativeId::NetIsConnected),
             ("http", "post") => Some(NativeId::HttpPost),
+            ("outbox", "entries") => Some(NativeId::OutboxEntries),
             _ => None,
         },
         _ => None,

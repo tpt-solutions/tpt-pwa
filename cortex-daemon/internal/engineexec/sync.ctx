@@ -1,12 +1,15 @@
 // The sync task executed by the engine VM when -engine is configured.
 // Mirrors cortex-engine/examples/sync.ctx (spec §6) -- keep both in sync;
-// the engine's integration tests pin the example's semantics.
+// the engine's integration tests pin the example's semantics. The daemon
+// injects this task's outbox entries via native.outbox.entries(); clearing
+// them is bookkeeping the daemon performs when the task completes.
+// (native.db.* is a real SQL surface over the daemon's database -- see
+// internal/taskdb -- not the outbox view.)
 task syncOfflineData() -> void {
-    let pending = native.db.query("SELECT * FROM outbox WHERE status = 'pending'");
+    let pending = native.outbox.entries();
     if native.net.isConnected() {
         for item in pending {
             native.http.post(item.endpoint, item);
-            native.db.exec("UPDATE outbox SET status = 'synced' WHERE id = ?", item.id);
         }
     }
 }

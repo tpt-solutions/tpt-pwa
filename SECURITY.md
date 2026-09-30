@@ -66,6 +66,12 @@ all allowed). A script exceeding the allowlist parks as permanently failed
 without any effect firing — and because the manifest is a full compile,
 only scripts that would actually run can declare capabilities at all.
 
+**`native.db.*` is real SQL**: task scripts read and write the daemon's
+SQLite database (`<data-dir>/cortex.db`) — their durable scratch space.
+The database contains only what task scripts put there (the task queue and
+the PWA's notes live elsewhere by design), and the same `-allow-natives`
+gate decides whether a script may touch it at all.
+
 ### 4. Sync payloads
 
 Outbox entries are handed to the configured sync endpoint as JSON with the

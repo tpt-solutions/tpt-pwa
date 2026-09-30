@@ -17,6 +17,10 @@ pub trait NativeEnv {
     fn db_exec(&mut self, sql: &str, params: &[Value]) -> Result<Value, String>;
     fn net_is_connected(&mut self) -> Result<bool, String>;
     fn http_post(&mut self, url: &str, body: &Value) -> Result<Value, String>;
+    /// The task's outbox entries, injected by the host (the daemon hands the
+    /// sync script its pending rows here; `db.query` is a separate, real SQL
+    /// surface).
+    fn outbox_entries(&mut self) -> Result<Vec<Value>, String>;
 }
 
 /// Compile-time registry: validates native arity (as a maximum -- trailing
@@ -24,14 +28,16 @@ pub trait NativeEnv {
 /// fail before execution.
 #[derive(Clone, Debug)]
 pub struct NativeRegistry {
-    max_arity: [u8; 4],
+    max_arity: [u8; 5],
 }
 
 impl NativeRegistry {
     pub fn standard() -> Self {
+        // db.* may carry up to 32 positional binds after the SQL string;
+        // the rest have fixed arity.
         NativeRegistry {
-            max_arity: [2, 2, 0, 2],
-        } // db.query, db.exec, net.isConnected, http.post
+            max_arity: [32, 32, 0, 2, 0],
+        } // db.query, db.exec, net.isConnected, http.post, outbox.entries
     }
 
     /// Whether a call with `argc` arguments is well-formed.
@@ -42,11 +48,13 @@ impl NativeRegistry {
 
 /// Deterministic in-memory environment for tests and the CLI: `db.query`
 /// answers from a fixed row set, `db.exec` records SQL, `http.post` records
-/// (url, body) pairs, `net.isConnected` returns a fixed flag.
+/// (url, body) pairs, `net.isConnected` returns a fixed flag, and
+/// `outbox.entries` answers from its own fixed set.
 #[derive(Default)]
 pub struct MemoryNative {
     pub connected: bool,
     pub rows: Vec<Value>,
+    pub outbox: Vec<Value>,
     pub executed_sql: Vec<(String, Vec<Value>)>,
     pub posts: Vec<(String, Value)>,
 }
@@ -68,6 +76,10 @@ impl NativeEnv for MemoryNative {
     fn http_post(&mut self, url: &str, body: &Value) -> Result<Value, String> {
         self.posts.push((url.to_string(), body.clone()));
         Ok(Value::Int(self.posts.len() as i64))
+    }
+
+    fn outbox_entries(&mut self) -> Result<Vec<Value>, String> {
+        Ok(self.outbox.clone())
     }
 }
 
