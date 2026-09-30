@@ -7,9 +7,27 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- PWA note search: multi-term AND matching over title and body with
+  title-over-body ranking, wired to an accessible search box with a live
+  result count.
+- PWA export/import: JSON (lossless round-trip) and Markdown (human-readable,
+  metadata carried in invisible `<!-- tpt-pwa-note -->` markers; foreign
+  Markdown imports as a single note). Imports merge last-writer-wins through
+  the normal outbox, so they propagate to other devices.
+- PWA accessibility: `aria-live` announcements for search results, import
+  summaries and offline/queued state; labels on the previously
+  placeholder-only editor fields; `prefers-reduced-motion` disables view
+  transitions and animations (both the CSS and the `startViewTransition`
+  path).
 - `cortex-daemon doctor` subcommand: port, origin, auth, queue, data-dir,
   engine and sync-endpoint checks (`--json` for tooling), linked from the
   PWA's cortex status chip.
+- Daemon structured logging: `-log-format text|json` and `-log-level`;
+  library logs go through slog with `component` attrs (json emits one
+  parseable object per line).
+- Daemon `-config` JSON file: keys mirror the flags, explicit flags override,
+  unknown keys and bad values fail loudly naming the file; `doctor` honors it
+  too.
 - Release binaries workflow: daemon + engine archives for
   linux/macos/windows on amd64/arm64 with per-target SHA256SUMS and a
   tests-first gate; one-line installers (`scripts/install.sh`,
@@ -26,6 +44,14 @@ All notable changes to tpt-pwa are documented here. The format follows
   `packageManager`, workspace-scoped installs, direct-execution guard for
   the SW generator, `gradlew` exec bit, shell job builds the PWA and runs
   cargo check in `src-tauri/`.
+- CONTRIBUTING.md expansion: repo layout/test map, local dev loop,
+  regression-test-first convention, style and commit conventions, and the
+  maintainer release process.
+
+### Changed
+- Android CI enables the Gradle build cache and parallel execution so
+  setup-gradle's persisted caches reuse task outputs (configuration cache
+  deferred until CI-verified).
 
 ### Changed
 - Service-worker updates no longer `skipWaiting()` mid-session: a waiting
