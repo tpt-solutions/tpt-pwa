@@ -52,7 +52,7 @@ The PWA calls this implicitly via `checkCortexConnection()`; a successful handsh
 { "taskId": "53c281e98e29be47", "state": "queued", "accepted": 1, "deduplicated": false }
 ```
 
-Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <RFC 3339>` to defer. Params require exactly one of `entries`/`payload`; `kind` is mandatory and must be one of `syncNotes` or `crdtMerge` (anything else is `-32602`).
+Also accepted: `"payload": <any>` instead of `entries`, optional `"runAt": <RFC 3339>` to defer, and optional `"every": "<Go duration>"` (e.g. `"5m"`) to make the task RECUR: after every successful completion the daemon requeues it (fresh attempt budget) due at now+every, so a periodic recipe needs exactly one enqueue. Recurrence stops when the task is cancelled, parked as `failed` (retry budget exhausted or a permanent failure), or pruned — `cortex.task.prune` never removes recurring tasks, even mid-completion. Invalid `every` values (unparseable or ≤ 0) are `-32602`. Params require exactly one of `entries`/`payload`; `kind` is mandatory and must be one of `syncNotes` or `crdtMerge` (anything else is `-32602`).
 
 `"batchId": "<string>"` is an optional idempotency key: re-submitting a batch whose queued/running task already carries that key returns the SAME task with `"deduplicated": true` instead of queueing it twice. The PWA derives the key from the batch contents, so a flush retried after a lost response dedupes.
 
@@ -64,10 +64,11 @@ Also accepted: `"payload": <any>` instead of `entries`, and optional `"runAt": <
 // params: { "taskId": "53c281e98e29be47" }
 // result
 { "taskId": "…", "kind": "syncNotes", "state": "completed", "attempts": 1,
-  "runAt": "…", "createdAt": "…", "updatedAt": "…", "lastError": "" }
+  "runAt": "…", "createdAt": "…", "updatedAt": "…", "lastError": "",
+  "every": "5m0s" }
 ```
 
-`state` ∈ `queued | running | completed | failed`. Failed tasks were retried `-max-attempts` times (exponential backoff) before being parked.
+`state` ∈ `queued | running | completed | failed`. Failed tasks were retried `-max-attempts` times (exponential backoff) before being parked. `every` is present only on recurring tasks.
 
 ### `cortex.task.list`
 
@@ -97,7 +98,7 @@ Only **queued** tasks can be cancelled; running tasks refuse (`-32602`) because 
 // params: none (or null); result: { "pruned": 3 }
 ```
 
-Removes every `completed`/`failed` task from the queue file; pending work is never touched.
+Removes every `completed`/`failed` task from the queue file; pending work is never touched — and recurring (`every`) tasks survive pruning even in their instant of completion, because pruning one would silently cancel a schedule.
 
 ## Plain HTTP endpoints (same loopback server, not JSON-RPC)
 

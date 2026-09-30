@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/tpt-solutions/tpt-pwa/cortex-daemon/internal/rpc"
 )
 
 func rpcCall(t *testing.T, method string, params any) (any, error) {
@@ -116,6 +119,51 @@ func TestFSWriteResolvesSymlinksAndWritesAtomically(t *testing.T) {
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) == ".tmp-*" || len(entry.Name()) > 4 && entry.Name()[len(entry.Name())-6:] == ".tmp-*" {
 			t.Fatalf("temp file litter left behind: %s", entry.Name())
+		}
+	}
+}
+
+func TestEnqueueAcceptsAndValidatesEvery(t *testing.T) {
+	taskQueue := mustQueue(t)
+
+	// A valid `every` lands on the task and comes back in its JSON form.
+	encoded, _ := json.Marshal(map[string]any{
+		"kind":    "syncNotes",
+		"batchId": "periodic-1",
+		"payload": map[string]any{"url": "https://example/feed"},
+		"every":   "5m",
+	})
+	result, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), encoded)
+	if err != nil {
+		t.Fatalf("enqueue with every: %v", err)
+	}
+	task, _ := taskQueue.Get(result.(map[string]any)["taskId"].(string))
+	if task.Every != 5*time.Minute {
+		t.Fatalf("every = %s, want 5m0s", task.Every)
+	}
+	if got := taskToJSON(task)["every"]; got != "5m0s" {
+		t.Fatalf("task JSON every = %v, want 5m0s", got)
+	}
+
+	// Garbage durations and non-positive intervals are invalid params.
+	for _, bad := range []string{"soon", "0s", "-5m", ""} {
+		params, _ := json.Marshal(map[string]any{
+			"kind":    "syncNotes",
+			"batchId": "periodic-bad-" + bad,
+			"payload": map[string]any{},
+			"every":   bad,
+		})
+		_, err := taskEnqueueHandler(taskQueue, nil)(context.Background(), params)
+		if bad == "" {
+			// Empty means one-shot: must be accepted.
+			if err != nil {
+				t.Fatalf("empty every must mean one-shot, got %v", err)
+			}
+			continue
+		}
+		rpcErr, ok := err.(*rpc.RPCError)
+		if !ok || rpcErr.Code != rpc.CodeInvalidParams {
+			t.Fatalf("every %q: want -32602, got %v", bad, err)
 		}
 	}
 }

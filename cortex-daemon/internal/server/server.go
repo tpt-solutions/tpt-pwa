@@ -257,6 +257,9 @@ type enqueueParams struct {
 	Payload json.RawMessage   `json:"payload,omitempty"`
 	Entries []json.RawMessage `json:"entries,omitempty"`
 	RunAt   *time.Time        `json:"runAt,omitempty"`
+	// Every makes the task recur on successful completion (Go duration
+	// string, e.g. "5m"). Empty = one-shot.
+	Every string `json:"every,omitempty"`
 }
 
 func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
@@ -292,7 +295,15 @@ func taskEnqueueHandler(taskQueue *queue.Queue, stats *taskStats) rpc.Handler {
 		if p.RunAt != nil {
 			runAt = *p.RunAt
 		}
-		task, deduplicated, err := taskQueue.EnqueueIdempotent(p.Kind, p.BatchID, body, runAt)
+		var every time.Duration
+		if p.Every != "" {
+			parsed, err := time.ParseDuration(p.Every)
+			if err != nil || parsed <= 0 {
+				return nil, &rpc.RPCError{Code: rpc.CodeInvalidParams, Message: fmt.Sprintf("every must be a positive duration like \"5m\", got %q", p.Every)}
+			}
+			every = parsed
+		}
+		task, deduplicated, err := taskQueue.EnqueueIdempotent(p.Kind, p.BatchID, body, runAt, every)
 		if err != nil {
 			return nil, err
 		}
@@ -476,7 +487,7 @@ func writeFileAtomic(path string, data []byte) error {
 }
 
 func taskToJSON(task queue.Task) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"taskId":    task.ID,
 		"kind":      task.Kind,
 		"state":     string(task.State),
@@ -486,6 +497,10 @@ func taskToJSON(task queue.Task) map[string]any {
 		"updatedAt": task.UpdatedAt,
 		"lastError": task.LastError,
 	}
+	if task.Every > 0 {
+		out["every"] = task.Every.String()
+	}
+	return out
 }
 
 func within(root, path string) bool {

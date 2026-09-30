@@ -106,3 +106,97 @@ func TestDueRespectsRunAt(t *testing.T) {
 		t.Fatalf("task should be due after RunAt, got %d", len(due))
 	}
 }
+
+func TestRecurringTaskRequeuesAfterCompletion(t *testing.T) {
+	q, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	task, _, err := q.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("enqueue recurring: %v", err)
+	}
+	if _, err := q.Transition(task.ID, StateRunning, "", 8, time.Now()); err != nil {
+		t.Fatalf("to running: %v", err)
+	}
+	if _, err := q.Transition(task.ID, StateCompleted, "", 8, time.Now()); err != nil {
+		t.Fatalf("to completed: %v", err)
+	}
+
+	before := time.Now()
+	requeued, err := q.Requeue(task.ID, task.Every, before)
+	if err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	if requeued.State != StateQueued {
+		t.Fatalf("want queued, got %s", requeued.State)
+	}
+	if requeued.Attempts != 0 {
+		t.Fatalf("recurrence must get a fresh attempt budget, got %d", requeued.Attempts)
+	}
+	if want := before.Add(50 * time.Millisecond); requeued.RunAt.Before(want.Add(-time.Millisecond)) || requeued.RunAt.After(want.Add(time.Millisecond)) {
+		t.Fatalf("runAt = %s, want ~%s", requeued.RunAt, want)
+	}
+	// The recurrence is due exactly on its interval.
+	if due := q.Due(before.Add(49 * time.Millisecond)); len(due) != 0 {
+		t.Fatalf("not due yet, got %d", len(due))
+	}
+	if due := q.Due(before.Add(51 * time.Millisecond)); len(due) != 1 {
+		t.Fatalf("due after the interval, got %d", len(due))
+	}
+
+	// Only completed tasks requeue, and only with a positive interval.
+	if _, err := q.Requeue(task.ID, task.Every, time.Now()); err == nil {
+		t.Fatal("requeuing a queued task must fail")
+	}
+	if _, err := q.Requeue(task.ID, 0, time.Now()); err == nil {
+		t.Fatal("requeue needs a positive interval")
+	}
+}
+
+func TestPruneSkipsRecurringTasks(t *testing.T) {
+	q, _ := Open(filepath.Join(t.TempDir(), "queue.json"))
+	oneShot, _ := q.Enqueue("syncNotes", nil, time.Time{})
+	recurring, _, _ := q.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, time.Minute)
+	for _, task := range []string{oneShot.ID, recurring.ID} {
+		if _, err := q.Transition(task, StateRunning, "", 8, time.Now()); err != nil {
+			t.Fatalf("to running: %v", err)
+		}
+		if _, err := q.Transition(task, StateCompleted, "", 8, time.Now()); err != nil {
+			t.Fatalf("to completed: %v", err)
+		}
+	}
+
+	pruned, err := q.PruneFinished()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned %d tasks, want only the one-shot", pruned)
+	}
+	if got, _ := q.Get(recurring.ID); got.ID != recurring.ID {
+		t.Fatal("a completed recurring task must survive pruning: it is a live schedule")
+	}
+}
+
+func TestCompletedRecurringTaskRecoversAfterCrash(t *testing.T) {
+	// Crash window: the task completed, the requeue had not happened yet.
+	path := filepath.Join(t.TempDir(), "queue.json")
+	q1, _ := Open(path)
+	task, _, _ := q1.EnqueueIdempotent("syncNotes", "", json.RawMessage(`{}`), time.Time{}, time.Minute)
+	if _, err := q1.Transition(task.ID, StateRunning, "", 8, time.Now()); err != nil {
+		t.Fatalf("to running: %v", err)
+	}
+	if _, err := q1.Transition(task.ID, StateCompleted, "", 8, time.Now()); err != nil {
+		t.Fatalf("to completed: %v", err)
+	}
+
+	q2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got, _ := q2.Get(task.ID)
+	if got.State != StateQueued {
+		t.Fatalf("a completed recurring task must resume its schedule after a crash, got %s", got.State)
+	}
+	if got.Attempts != 0 {
+		t.Fatalf("recovered recurrence must start fresh, got %d attempts", got.Attempts)
+	}
+}

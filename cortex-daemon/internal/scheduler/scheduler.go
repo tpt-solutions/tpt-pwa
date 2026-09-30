@@ -82,6 +82,15 @@ func (s *Scheduler) tick(ctx context.Context) {
 		switch {
 		case err == nil:
 			s.transition(task.ID, queue.StateCompleted, "", s.MaxAttempts)
+			// Recurring tasks requeue themselves here: one enqueue, runs
+			// forever on its interval (until cancelled, parked by a
+			// permanent failure, or pruned by an operator — prune skips
+			// recurring work).
+			if task.Every > 0 {
+				if _, err := s.Queue.Requeue(task.ID, task.Every, time.Now()); err != nil {
+					slog.Warn("recurring task requeue failed; schedule stops", "component", "scheduler", "task", task.ID, "error", err)
+				}
+			}
 		case errors.As(err, &permanent):
 			// Retrying can never fix it (e.g. the endpoint rejected an entry
 			// with 4xx): park it for inspection right away.

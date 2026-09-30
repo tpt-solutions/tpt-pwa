@@ -151,3 +151,71 @@ func TestPermanentFailureParksTaskWithoutRetries(t *testing.T) {
 		t.Fatalf("permanent failure must not retry, got %d attempts", got.Attempts)
 	}
 }
+
+func TestRecurringTaskRunsRepeatedlyUntilCancelled(t *testing.T) {
+	q, exec, s := newFixture(t, []error{nil, nil})
+	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
+	// One enqueue, 30ms interval: two Ticks separated by the interval must
+	// run it twice with a fresh attempt budget each time.
+	task, _, err := q.EnqueueIdempotent("syncNotes", "", body, time.Time{}, 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("enqueue recurring: %v", err)
+	}
+
+	s.Tick(context.Background()) // run 1 -> completed -> requeued
+	got, _ := q.Get(task.ID)
+	if got.State != queue.StateQueued {
+		t.Fatalf("after run 1 the schedule must requeue, got %s", got.State)
+	}
+	if got.Attempts != 0 {
+		t.Fatalf("recurrence must reset attempts, got %d", got.Attempts)
+	}
+
+	// Not due yet: the interval is respected.
+	time.Sleep(10 * time.Millisecond)
+	s.Tick(context.Background())
+	if len(exec.tasks) != 1 {
+		t.Fatalf("task ran %d times before its interval elapsed", len(exec.tasks))
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	s.Tick(context.Background()) // run 2 -> completed -> requeued again
+	if len(exec.tasks) != 2 {
+		t.Fatalf("task ran %d times, want 2", len(exec.tasks))
+	}
+	got, _ = q.Get(task.ID)
+	if got.State != queue.StateQueued {
+		t.Fatalf("after run 2 the schedule must requeue, got %s", got.State)
+	}
+
+	// Cancelling stops the schedule for good.
+	if _, err := q.Cancel(task.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	s.Tick(context.Background())
+	if len(exec.tasks) != 2 {
+		t.Fatalf("a cancelled recurring task must never run again, ran %d times", len(exec.tasks))
+	}
+}
+
+func TestRecurringTaskThatFailsPermanentlyStops(t *testing.T) {
+	permanent := &queue.PermanentError{Err: errors.New("endpoint rejected the batch")}
+	q, exec, s := newFixture(t, []error{permanent})
+	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
+	task, _, err := q.EnqueueIdempotent("syncNotes", "", body, time.Time{}, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("enqueue recurring: %v", err)
+	}
+
+	s.Tick(context.Background()) // fails permanently -> parked failed
+	got, _ := q.Get(task.ID)
+	if got.State != queue.StateFailed {
+		t.Fatalf("a permanently failing recurring task must park, got %s", got.State)
+	}
+	time.Sleep(15 * time.Millisecond)
+	s.Tick(context.Background())
+	if len(exec.tasks) != 1 {
+		t.Fatalf("a parked recurring task must not run again, ran %d times", len(exec.tasks))
+	}
+}

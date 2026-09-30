@@ -7,6 +7,11 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Recurring tasks: `cortex.task.enqueue` accepts `every` (e.g. `"5m"`) and
+  the queue requeues each successful completion with a fresh attempt budget.
+  Recurrence survives crashes (a completed recurring task resumes on
+  restart), is immune to pruning, and stops on cancel or permanent failure —
+  periodic recipes now need exactly one enqueue (docs/jsonrpc-contract.md).
 - Capability manifests: `cortex-engine manifest` prints a script's static
   native-call surface as JSON, and the daemon's `-allow-natives` enforces it
   before any task executes — scripts exceeding the allowlist park as

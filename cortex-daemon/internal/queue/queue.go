@@ -40,11 +40,18 @@ type Task struct {
 	Kind           string          `json:"kind"`
 	Body           json.RawMessage `json:"body,omitempty"`
 	RunAt          time.Time       `json:"runAt,omitempty"`
-	State          State           `json:"state"`
-	Attempts       int             `json:"attempts"`
-	LastError      string          `json:"lastError,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	// Every, when > 0, makes the task RECUR: after each successful
+	// completion the queue requeues it (fresh attempt budget) with
+	// RunAt = now + Every, so recipes like periodic-fetch run on an
+	// interval without anything re-enqueueing them. Failures follow the
+	// normal retry/backoff/park path; a parked or cancelled recurring task
+	// stops recurring.
+	Every     time.Duration `json:"every,omitempty"`
+	State     State         `json:"state"`
+	Attempts  int           `json:"attempts"`
+	LastError string        `json:"lastError,omitempty"`
+	CreatedAt time.Time     `json:"createdAt"`
+	UpdatedAt time.Time     `json:"updatedAt"`
 }
 
 // PermanentError wraps a task failure that retrying can never fix (e.g. the
@@ -84,10 +91,18 @@ func Open(path string) (*Queue, error) {
 		slog.Warn("corrupt queue file moved aside; starting fresh", "component", "queue", "aside", aside)
 		return q, nil
 	}
-	// Tasks caught mid-flight by a crash go back to the queue.
+	// Tasks caught mid-flight by a crash go back to the queue. A recurring
+	// task caught in its instant of completion (crash between the completed
+	// transition and the requeue) resumes its schedule instead of sitting
+	// completed forever.
 	for _, t := range tasks {
-		if t.State == StateRunning {
+		switch {
+		case t.State == StateRunning:
 			t.State = StateQueued
+		case t.State == StateCompleted && t.Every > 0:
+			t.State = StateQueued
+			t.Attempts = 0
+			t.RunAt = time.Now().UTC().Add(t.Every)
 		}
 		q.tasks = append(q.tasks, t)
 		q.byID[t.ID] = t
@@ -97,14 +112,15 @@ func Open(path string) (*Queue, error) {
 
 // Enqueue appends a task and persists the queue.
 func (q *Queue) Enqueue(kind string, body json.RawMessage, runAt time.Time) (*Task, error) {
-	task, _, err := q.EnqueueIdempotent(kind, "", body, runAt)
+	task, _, err := q.EnqueueIdempotent(kind, "", body, runAt, 0)
 	return task, err
 }
 
 // EnqueueIdempotent appends a task unless a queued/running task with the same
 // IdempotencyKey already exists, in which case that task is returned with
-// deduplicated=true (the submission is a retry, not new work).
-func (q *Queue) EnqueueIdempotent(kind, idempotencyKey string, body json.RawMessage, runAt time.Time) (*Task, bool, error) {
+// deduplicated=true (the submission is a retry, not new work). every > 0
+// makes the task recur after each successful completion.
+func (q *Queue) EnqueueIdempotent(kind, idempotencyKey string, body json.RawMessage, runAt time.Time, every time.Duration) (*Task, bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if idempotencyKey != "" {
@@ -127,6 +143,7 @@ func (q *Queue) EnqueueIdempotent(kind, idempotencyKey string, body json.RawMess
 		Kind:           kind,
 		Body:           body,
 		RunAt:          runAt,
+		Every:          every,
 		State:          StateQueued,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -280,15 +297,46 @@ func (q *Queue) Retry(id string) (Task, error) {
 	return *t, nil
 }
 
+// Requeue returns a COMPLETED recurring task to the queue with a fresh
+// attempt budget, due at now+every. This is the recurrence step: the
+// scheduler calls it after each successful run of a task with Every > 0.
+func (q *Queue) Requeue(id string, every time.Duration, now time.Time) (Task, error) {
+	if every <= 0 {
+		return Task{}, fmt.Errorf("queue: requeue needs a positive interval, got %s", every)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	t, ok := q.byID[id]
+	if !ok {
+		return Task{}, fmt.Errorf("queue: unknown task %s", id)
+	}
+	if t.State != StateCompleted {
+		return Task{}, fmt.Errorf("queue: task %s is %s; only completed tasks can be requeued", id, t.State)
+	}
+	prev := *t
+	t.State = StateQueued
+	t.Attempts = 0
+	t.LastError = ""
+	t.RunAt = now.UTC().Add(every)
+	t.UpdatedAt = now.UTC()
+	if err := q.saveLocked(); err != nil {
+		*t = prev
+		return Task{}, err
+	}
+	return *t, nil
+}
+
 // PruneFinished drops every completed/failed task and returns how many were
-// removed. Pending work is never touched.
+// removed. Pending work is never touched -- and recurring (Every > 0) tasks
+// count as pending even in their instant of completion: pruning one would
+// silently cancel a schedule, so they survive and requeue instead.
 func (q *Queue) PruneFinished() (int, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	kept := make([]*Task, 0, len(q.tasks))
 	pruned := 0
 	for _, t := range q.tasks {
-		if t.State == StateCompleted || t.State == StateFailed {
+		if (t.State == StateCompleted || t.State == StateFailed) && t.Every <= 0 {
 			pruned++
 			continue
 		}
@@ -310,13 +358,18 @@ func (q *Queue) PruneFinished() (int, error) {
 
 // pruneLocked drops the oldest finished tasks beyond maxFinishedTasks.
 // Caller holds mu. Finished tasks are kept for inspection only; pruning them
-// does not lose pending work.
+// does not lose pending work. Recurring tasks (Every > 0) are never dropped
+// here even mid-completion: they are a live schedule, not history.
 func (q *Queue) pruneLocked() {
 	finishedSeen := 0
 	kept := make([]*Task, 0, len(q.tasks))
 	for i := len(q.tasks) - 1; i >= 0; i-- {
 		t := q.tasks[i]
 		if state := t.State; state == StateCompleted || state == StateFailed {
+			if t.Every > 0 && state == StateCompleted {
+				kept = append(kept, t)
+				continue
+			}
 			finishedSeen++
 			if finishedSeen > maxFinishedTasks {
 				continue // an old finished task beyond the inspection cap
