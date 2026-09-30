@@ -162,7 +162,7 @@ Findings from a second full review (PWA, daemon, engine, adoption). Found by rea
 - [ ] Daemon: a real SQL-backed `native.db.query`/`db.exec` — pick an embedded store (candidate: `modernc.org/sqlite`, pure Go but a large dependency, weighed against the first-principles-dependencies rule), persist it under the data dir, and re-home the sync script's outbox-entries view (today `db.query` IS that view) so the embedded sync.ctx keeps working
 - [ ] `.ctx` playground in the PWA (Rust VM compiled to WASM, same bytecode as the daemon)
 - [ ] Capability-manifest recipes: scripts declare the natives they use (net/fs/db) and the daemon asks for consent
-- [ ] Deterministic replay: record host-call traces from the stdio JSON protocol for fixtures and bug reports
+- [x] Deterministic replay: record host-call traces from the stdio JSON protocol for fixtures and bug reports — DONE (2026-10-01: `cortex-engine exec-host --record` / `run --record` write JSONL traces of every native call plus the final outcome; `cortex-engine replay` re-runs a script against a trace with no host, naming any divergence — different calls, params, count, or result; proven end-to-end in `tests/trace.rs` including a recorded-against-real-host → replayed-hostless round trip)
 - [ ] QR pairing from the Android/shell app, replacing the query-string token with a short-lived exchange
 - [ ] CRDT-synced script/recipe store across devices
 - [ ] Daemon-to-daemon LAN sync (mDNS plus WebSocket) with a conflict-inspector UI over CRDT history

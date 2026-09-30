@@ -62,6 +62,20 @@ The instruction-set table lives next to the enum in `bytecode.rs` so the harness
 | `parser.rs` / `lexer.rs` | total functions, no panics | L1 (adversarial inputs) |
 | `natives.rs` hosts (daemon/Android) | no — effects are host-side; covered by Go unit tests and contract tests | out of scope here |
 
+### Deterministic replay (executability of "same bytes, same behavior")
+
+Because the VM is total and natives are the only effect channel, a recorded
+host-call trace is a complete behavioral fingerprint of a run:
+`cortex-engine exec-host --script s.ctx --record trace.jsonl` appends every
+native call (method, params, result-or-error) and the final outcome to a
+JSONL file, and `cortex-engine replay s.ctx --trace trace.jsonl` re-runs the
+script against the trace with **no host attached**. Any divergence — a
+different call, different params, an extra or missing call, a different
+result — is a loud, named error. That turns bug reports into reproducible
+fixtures: a trace captured against a real daemon replays in CI forever
+(`tests/trace.rs` proves the round trip, including recorded-failure
+replays).
+
 ## 5. What would falsify the guarantee
 
 Any `panic!`/`unwrap` reachable from `Vm::run` inputs, an instruction handler that can loop without consuming budget, or a `NativeEnv` implementation that blocks (the trait contract says: return errors, never hang). CI (`cargo clippy -D warnings`, `cargo test`) plus the safety suite guard all three today.

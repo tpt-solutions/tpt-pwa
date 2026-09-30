@@ -7,6 +7,12 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Deterministic replay: `cortex-engine exec-host --record` (and `run
+  --record`) write JSONL traces of every native call plus the final
+  outcome; `cortex-engine replay` re-runs a script against a trace with no
+  host attached and names any divergence. A trace captured against a real
+  daemon becomes a permanent regression fixture (docs/formal-verification.md
+  §"Deterministic replay").
 - Engine language upgrade: `null` literals, `*` `/` `%` (checked integer
   division — zero divisors and i64::MIN / -1 are data errors), unary minus,
   re-assignment of locals (`x = e;`), `while` loops, list and map literals

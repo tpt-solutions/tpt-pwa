@@ -24,6 +24,7 @@ pub mod host;
 pub mod lexer;
 pub mod natives;
 pub mod parser;
+pub mod trace;
 pub mod value;
 pub mod vm;
 
