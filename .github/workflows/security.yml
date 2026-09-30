@@ -15,7 +15,7 @@ jobs:
     name: Go vulnerabilities (govulncheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -27,7 +27,7 @@ jobs:
     name: Rust advisories (cargo audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       - working-directory: cortex-engine
@@ -37,7 +37,7 @@ jobs:
     name: JS advisories (pnpm audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -53,6 +53,6 @@ jobs:
     name: Manifest versions agree
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: All manifests must carry the same version
         run: node scripts/check-version-sync.mjs

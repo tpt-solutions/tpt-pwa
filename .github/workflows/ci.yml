@@ -20,7 +20,7 @@ jobs:
       android: ${{ steps.filter.outputs.android }}
       companions: ${{ steps.filter.outputs.companions }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -57,7 +57,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pwa == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -90,7 +90,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.daemon == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -113,7 +113,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.engine == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -149,7 +149,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.shell == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-go@v5
         with:
@@ -188,7 +188,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.android == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -204,7 +204,7 @@ jobs:
       go: ${{ steps.scan.outputs.go }}
       rust: ${{ steps.scan.outputs.rust }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: scan
         run: |
           # Convention: `pnpm scaffold -- --dir companions` puts companions here.
@@ -230,7 +230,7 @@ jobs:
       run:
         working-directory: companions/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -251,7 +251,7 @@ jobs:
       run:
         working-directory: companions/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
