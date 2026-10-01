@@ -11,7 +11,7 @@ import { createEncryptedStorage } from './storage/encrypted'
 import { atRestSlot, cryptoEnabled, cryptoUnlocked, disableCrypto, enableCrypto, getSyncKey, unlockCrypto } from './cryptostate'
 import { SyncManager } from './sync'
 import { summarizeTasks } from './telemetry'
-import { appStatus, capabilities, cryptoStatus, daemonTasks, daemonVersion, lastFlush, notes, online, pendingSync } from './stores'
+import { appStatus, capabilities, cryptoStatus, daemonTasks, daemonVersion, lastFlush, notes, online, pendingSync, scripts } from './stores'
 
 let rawStorage: NoteStorage | null = null
 let storage: NoteStorage | null = null
@@ -78,17 +78,11 @@ async function finishInit(): Promise<void> {
     // persists note content in its own store and is not encrypted yet, so
     // keeping it live would leak plaintext beside the encrypted rows.
     if (cryptoEnabled()) {
+      // The mirror persists note content unencrypted; while encryption is
+      // on it stays off entirely (see startMirror/stopMirror).
       capabilities.update((c) => ({ ...c, crdt: false }))
     } else {
-      const snapshot = await loadCrdtSnapshot()
-      crdtDoc = await NoteDoc.open(snapshot ?? undefined)
-      if (crdtDoc && !snapshot) {
-        // First run: seed the mirror from durable storage so a later merge
-        // starts from what the user already has.
-        for (const note of await storage.listNotes()) crdtDoc.upsertNote(note)
-        await persistCrdt()
-      }
-      capabilities.update((c) => ({ ...c, crdt: crdtDoc !== null }))
+      await startMirror()
     }
 
     installStorage(storage)
@@ -192,6 +186,7 @@ export async function enableEncryption(passphrase: string): Promise<void> {
   await enableCrypto(passphrase)
   storage = createEncryptedStorage(rawStorage ?? storage!, atRestSlot)
   installStorage(storage)
+  stopMirror()
   cryptoStatus.set({ enabled: true, unlocked: true })
   await refreshNotes()
 }
@@ -206,6 +201,54 @@ export async function disableEncryption(passphrase: string): Promise<void> {
   installStorage(raw)
   cryptoStatus.set({ enabled: false, unlocked: false })
   await refreshNotes()
+  await startMirror()
+}
+
+/**
+ * Bring the CRDT mirror up (boot with encryption off, or after disabling
+ * encryption at runtime): load the last snapshot, seeding it from durable
+ * storage on first run, and publish the script library.
+ */
+async function startMirror(): Promise<void> {
+  if (crdtDoc || cryptoEnabled() || !storage) return
+  const snapshot = await loadCrdtSnapshot()
+  crdtDoc = await NoteDoc.open(snapshot ?? undefined)
+  if (crdtDoc && !snapshot) {
+    // First run: seed the mirror from durable storage so a later merge
+    // starts from what the user already has.
+    for (const note of await storage.listNotes()) crdtDoc.upsertNote(note)
+    await persistCrdt()
+  }
+  capabilities.update((c) => ({ ...c, crdt: crdtDoc !== null }))
+  scripts.set(crdtDoc?.scripts() ?? [])
+}
+
+/** Tear the mirror down (enabling encryption): its store is plaintext. */
+function stopMirror(): void {
+  crdtDoc?.free()
+  crdtDoc = null
+  scripts.set([])
+  capabilities.update((c) => ({ ...c, crdt: false }))
+}
+
+/** Save a playground script into the CRDT library (new id = fresh entry). */
+export async function saveScript(name: string, source: string, id?: string): Promise<string> {
+  if (!crdtDoc) throw new Error('the script library needs the CRDT mirror (unavailable while encryption is on)')
+  const now = Date.now()
+  const existing = id ? get(scripts).find((s) => s.id === id) : undefined
+  const scriptId = id ?? crypto.randomUUID()
+  crdtDoc.upsertScript({ id: scriptId, name, source, createdAt: existing?.createdAt ?? now, updatedAt: now })
+  await persistCrdt()
+  scripts.set(crdtDoc.scripts())
+  return scriptId
+}
+
+/** Remove a library script (tombstoned in the CRDT, so deletes survive merges). */
+export async function deleteScript(id: string): Promise<void> {
+  if (!crdtDoc) throw new Error('the script library needs the CRDT mirror (unavailable while encryption is on)')
+  crdtDoc.removeScript(id)
+  await persistCrdt()
+  scripts.set(crdtDoc.scripts())
 }
 
 /** (Re)point the sync manager at the active storage. */

@@ -25,6 +25,10 @@ export const capabilities = writable<Capabilities>({ cortex: false, storageBacke
 /** Newest-first note list; mutations are optimistic and rolled back on persistence failure. */
 export const notes = writable<Note[]>([])
 
+/** The saved .ctx script library (CRDT-backed; empty while the mirror is off). */
+export type StoredScript = { id: string; name: string; source: string; createdAt: number; updatedAt: number }
+export const scripts = writable<StoredScript[]>([])
+
 /** Entries currently waiting in the durable outbox. */
 export const pendingSync = writable<number>(0)
 

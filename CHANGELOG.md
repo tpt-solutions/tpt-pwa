@@ -7,6 +7,10 @@ All notable changes to tpt-pwa are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `.ctx` script library in the playground: scripts save into the CRDT
+  document (same tombstone/LWW merge machinery as notes) and persist across
+  reloads, with save/load/delete UI. Unavailable while note encryption is
+  on (the mirror's store is not encrypted yet) — the playground shows why.
 - Note encryption (2026-10 design decision): passphrase-derived
   (WebCrypto PBKDF2-SHA256, 600k iterations), AES-GCM-256. At rest, note
   titles/body and outbox/dead-letter payloads are ciphertext in local

@@ -563,3 +563,32 @@ h2 {
 .lock-screen .crypto-form {
   width: 100%;
 }
+
+/* ---- Script library (playground) ------------------------------------------ */
+
+.script-library {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.library-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.library-name {
+  width: 220px;
+}

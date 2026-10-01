@@ -126,8 +126,50 @@ export class NoteDoc {
     return notes.sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
-  /** Merge a peer's document binary into this one (in place). Returns `false` if Wasm never loaded. */
-  async merge(remote: CrdtBinary): Promise<boolean> {
+  /**
+   * The `.ctx` script library (playground): same document, same merge
+   * machinery as notes, namespaced under a `script:` key prefix so script
+   * and note ids can never collide in the root map. Tombstones, LWW, and
+   * field-level merges work exactly as they do for notes.
+   */
+  upsertScript(script: { id: string; name: string; source: string; createdAt: number; updatedAt: number }): void {
+    const key = `script:${script.id}`
+    const existing = this.#doc.getWithType('_root', key)
+    const fieldsId = existing && existing[0] === 'map' ? existing[1] : this.#doc.putObject('_root', key, {})
+    this.#doc.put(fieldsId, 'name', script.name)
+    this.#doc.put(fieldsId, 'source', script.source)
+    this.#doc.put(fieldsId, 'createdAt', script.createdAt)
+    this.#doc.put(fieldsId, 'updatedAt', script.updatedAt)
+  }
+
+  removeScript(id: string, deletedAt = Date.now()): void {
+    const key = `script:${id}`
+    const existing = this.#doc.getWithType('_root', key)
+    const fieldsId =
+      existing && existing[0] === 'map' ? existing[1] : this.#doc.putObject('_root', key, {})
+    this.#doc.put(fieldsId, 'deletedAt', deletedAt)
+  }
+
+  /** Live (non-tombstoned) scripts, newest first. */
+  scripts(): Array<{ id: string; name: string; source: string; createdAt: number; updatedAt: number }> {
+    const scripts: Array<{ id: string; name: string; source: string; createdAt: number; updatedAt: number }> = []
+    for (const key of this.#doc.keys('_root')) {
+      if (!key.startsWith('script:')) continue
+      const existing = this.#doc.getWithType('_root', key)
+      if (!existing || existing[0] !== 'map') continue
+      const fieldsId = existing[1]
+      const name = this.#doc.get(fieldsId, 'name')
+      const source = this.#doc.get(fieldsId, 'source')
+      const createdAt = this.#doc.get(fieldsId, 'createdAt')
+      const updatedAt = this.#doc.get(fieldsId, 'updatedAt')
+      if (typeof name !== 'string' || typeof source !== 'string' || typeof createdAt !== 'number' || typeof updatedAt !== 'number') continue
+      if (typeof this.#doc.get(fieldsId, 'deletedAt') === 'number') continue
+      scripts.push({ id: key.slice('script:'.length), name, source, createdAt, updatedAt })
+    }
+    return scripts.sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  /** Merge a peer's document binary into this one (in place). Returns `false` if Wasm never loaded. */  async merge(remote: CrdtBinary): Promise<boolean> {
     const mod = await loadAutomerge()
     if (!mod) return false
     let other: AutomergeDoc | null = null

@@ -8,6 +8,8 @@
     type EnginePlayground,
     type RunReport,
   } from './engine'
+  import { saveScript, deleteScript } from './app'
+  import { cryptoStatus, scripts as scriptLibrary, type StoredScript } from './stores'
 
   /**
    * The `.ctx` playground: the real engine (same bytecode as the daemon)
@@ -42,6 +44,46 @@
   let runCount = $state(0)
 
   let playground: EnginePlayground | null = null
+  /** Script library state: the name field, and the entry being re-saved. */
+  let libraryName = $state('')
+  let editingId = $state<string | null>(null)
+  let libraryError = $state('')
+
+  const libraryDateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+
+  async function saveToLibrary(): Promise<void> {
+    libraryError = ''
+    const name = libraryName.trim() === '' ? `script ${libraryDateFormat.format(new Date())}` : libraryName.trim()
+    try {
+      await saveScript(name, source, editingId ?? undefined)
+      libraryName = ''
+      editingId = null
+    } catch (error) {
+      libraryError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  function loadFromLibrary(entry: StoredScript): void {
+    source = entry.source
+    libraryName = entry.name
+    editingId = entry.id
+  }
+
+  function startNewScript(): void {
+    source = DEFAULT_SCRIPT
+    libraryName = ''
+    editingId = null
+  }
+
+  async function removeFromLibrary(id: string): Promise<void> {
+    libraryError = ''
+    try {
+      await deleteScript(id)
+      if (editingId === id) editingId = null
+    } catch (error) {
+      libraryError = error instanceof Error ? error.message : String(error)
+    }
+  }
 
   onMount(async () => {
     try {
@@ -112,6 +154,48 @@
       aria-label="Script source"
       bind:value={source}
     ></textarea>
+
+    {#if $cryptoStatus.enabled}
+      <p class="muted playground-natives">
+        The script library needs the CRDT mirror, which stays off while note encryption is on.
+      </p>
+    {:else}
+      <div class="script-library">
+        <div class="crypto-form">
+          <input
+            class="crypto-input library-name"
+            type="text"
+            placeholder={editingId ? 'Name (updating)' : 'Script name'}
+            aria-label="Script name"
+            bind:value={libraryName}
+          />
+          <button class="button button--small" onclick={() => void saveToLibrary()}>
+            {editingId ? 'Update in library' : 'Save to library'}
+          </button>
+          {#if editingId}
+            <button class="button button--small button--ghost" onclick={startNewScript}>New script</button>
+          {/if}
+        </div>
+        {#if libraryError}<p class="playground-error" role="alert">{libraryError}</p>{/if}
+        {#if $scriptLibrary.length > 0}
+          <ul class="library-list">
+            {#each $scriptLibrary as entry (entry.id)}
+              <li>
+                <button class="button button--small" onclick={() => loadFromLibrary(entry)} title="Load into the editor">
+                  {entry.name}
+                </button>
+                <span class="muted">{libraryDateFormat.format(new Date(entry.updatedAt))}</span>
+                <button class="button button--small button--danger" onclick={() => void removeFromLibrary(entry.id)} aria-label={'Delete ' + entry.name}>
+                  Delete
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if !editingId}
+          <p class="muted playground-natives">Nothing saved yet — name it and save to keep it across reloads and devices.</p>
+        {/if}
+      </div>
+    {/if}
 
     <div class="playground-output">
       <div class="playground-result" role="status" aria-live="polite">
