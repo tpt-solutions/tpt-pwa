@@ -91,7 +91,7 @@ jobs:
     if: needs.changes.outputs.daemon == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
       - run: go vet ./...
@@ -151,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
       - uses: pnpm/action-setup@v4
@@ -231,7 +231,7 @@ jobs:
         working-directory: companions/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
       - run: go vet ./...
