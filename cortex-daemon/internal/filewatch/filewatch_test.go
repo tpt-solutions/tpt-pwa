@@ -94,12 +94,20 @@ func TestLoopIgnoresNonMatchingEvents(t *testing.T) {
 		t.Fatalf("non-matching events must not wake the task: %v", due)
 	}
 
-	// The matching event still works after the noise.
-	if err := os.WriteFile(filepath.Join(dataDir, "inbox", "data.csv"), []byte("a,b"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// The matching event still works after the noise. An event that fires
+	// before fsnotify has registered the directory is lost, not replayed, so
+	// re-create the file every 1.5s (longer than the 500ms debounce) until
+	// the watch picks it up.
+	matching := filepath.Join(dataDir, "inbox", "data.csv")
 	deadline := time.Now().Add(5 * time.Second)
+	nextWrite := time.Time{}
 	for {
+		if time.Now().After(nextWrite) {
+			if err := os.WriteFile(matching, []byte("a,b"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			nextWrite = time.Now().Add(1500 * time.Millisecond)
+		}
 		if due := tasks.Due(time.Now()); len(due) == 1 && due[0].ID == task.ID {
 			return
 		}
