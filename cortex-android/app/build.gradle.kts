@@ -1,7 +1,6 @@
 // Copyright 2026 TPT Solutions. Dual-licensed MIT OR Apache-2.0.
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 // Release signing is wired entirely through environment variables so CI can
@@ -44,9 +43,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
 }
 
