@@ -59,6 +59,13 @@ func Loop(ctx context.Context, tasks *queue.Queue, dataDir string, pollEvery tim
 		log.Warn("file watcher disabled: data dir unresolved", "component", "filewatch", "error", err)
 		return
 	}
+	// resolve() compares symlink-resolved watch dirs against this root, so the
+	// root must be resolved the same way. On Windows, temp paths carry 8.3
+	// short names (RUNNER~1) that EvalSymlinks expands; comparing an expanded
+	// watch dir with an unexpanded root wrongly reads as escaping the data dir.
+	if resolved, err := filepath.EvalSymlinks(absDataDir); err == nil {
+		absDataDir = resolved
+	}
 
 	var mu sync.Mutex
 	var active []watch
