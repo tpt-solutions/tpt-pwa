@@ -9,7 +9,10 @@ val releaseKeystore: String? = System.getenv("CORTEX_RELEASE_KEYSTORE")
 
 android {
     namespace = "solutions.tpt.cortex"
-    compileSdk = 35
+    // androidx.core 1.19.1 requires libraries to compile against API 37+.
+    // targetSdk and minSdk are unchanged; compileSdk only affects which APIs
+    // the code can reference at build time.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "solutions.tpt.cortex"
