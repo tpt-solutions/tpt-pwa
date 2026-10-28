@@ -155,9 +155,12 @@ func TestPermanentFailureParksTaskWithoutRetries(t *testing.T) {
 func TestRecurringTaskRunsRepeatedlyUntilCancelled(t *testing.T) {
 	q, exec, s := newFixture(t, []error{nil, nil})
 	body, _ := json.Marshal(map[string]any{"entries": []int{1}})
-	// One enqueue, 30ms interval: two Ticks separated by the interval must
-	// run it twice with a fresh attempt budget each time.
-	task, _, err := q.EnqueueSpec(queue.Spec{Kind: "syncNotes", Body: body, Every: 30 * time.Millisecond})
+	// One enqueue, 500ms interval: two Ticks separated by the interval must
+	// run it twice with a fresh attempt budget each time. The interval is
+	// long enough that a stalled CI runner cannot skip past the "not due"
+	// check.
+	const every = 500 * time.Millisecond
+	task, _, err := q.EnqueueSpec(queue.Spec{Kind: "syncNotes", Body: body, Every: every})
 	if err != nil {
 		t.Fatalf("enqueue recurring: %v", err)
 	}
@@ -172,13 +175,12 @@ func TestRecurringTaskRunsRepeatedlyUntilCancelled(t *testing.T) {
 	}
 
 	// Not due yet: the interval is respected.
-	time.Sleep(10 * time.Millisecond)
 	s.Tick(context.Background())
 	if len(exec.tasks) != 1 {
 		t.Fatalf("task ran %d times before its interval elapsed", len(exec.tasks))
 	}
 
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(every + 100*time.Millisecond)
 	s.Tick(context.Background()) // run 2 -> completed -> requeued again
 	if len(exec.tasks) != 2 {
 		t.Fatalf("task ran %d times, want 2", len(exec.tasks))
@@ -192,7 +194,7 @@ func TestRecurringTaskRunsRepeatedlyUntilCancelled(t *testing.T) {
 	if _, err := q.Cancel(task.ID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(every + 100*time.Millisecond)
 	s.Tick(context.Background())
 	if len(exec.tasks) != 2 {
 		t.Fatalf("a cancelled recurring task must never run again, ran %d times", len(exec.tasks))
