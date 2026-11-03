@@ -90,7 +90,7 @@ jobs:
       # SLSA provenance for the binaries: verifiable with
       #   gh attestation verify <file> -R tpt-solutions/tpt-pwa
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             ${{ env.DIST }}/cortex-daemon*
