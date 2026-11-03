@@ -3,5 +3,5 @@ plugins {
     // AGP 9 ships built-in Kotlin support, so org.jetbrains.kotlin.android
     // is no longer applied; applying it alongside AGP 9 fails with
     // "Cannot add extension with name 'kotlin'".
-    id("com.android.application") version "9.4.1" apply false
+    id("com.android.application") version "9.5.0" apply false
 }
